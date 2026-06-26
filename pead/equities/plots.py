@@ -8,7 +8,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from .config import Config
+from ..config import Config
 
 plt.rcParams.update({
     "figure.dpi": 130,

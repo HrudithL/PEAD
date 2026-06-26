@@ -8,8 +8,9 @@ from datetime import date
 
 import pandas as pd
 
-from .config import Config
-from . import data_loader, surprise, event_study, report, ticker_groups
+from ..config import Config
+from .. import ticker_groups
+from . import data_loader, surprise, event_study, report
 
 
 def _log(msg: str) -> None:

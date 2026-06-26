@@ -15,8 +15,9 @@ from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle, PageBreak,
 )
 
-from .config import Config
-from . import plots, ticker_groups
+from ..config import Config
+from .. import ticker_groups
+from . import plots
 
 _NAVY = colors.HexColor("#1f4e79")
 _LIGHT = colors.HexColor("#dce6f1")
