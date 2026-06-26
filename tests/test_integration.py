@@ -5,7 +5,7 @@ import os
 import numpy as np
 
 from pead.config import Config
-from pead import data_loader, surprise, event_study, analysis
+from pead.equities import data_loader, surprise, event_study, analysis
 
 
 def _cfg(synthetic, **overrides):

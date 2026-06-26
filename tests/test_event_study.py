@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from pead.config import Config
-from pead import event_study
+from pead.equities import event_study
 
 
 def _calendar(n=12):
