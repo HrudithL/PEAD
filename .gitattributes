@@ -1,0 +1,18 @@
+# Normalize line endings: let Git decide in the repo, keep native on checkout.
+* text=auto
+
+# Python is always LF in the repo.
+*.py text eol=lf
+
+# Windows-specific scripts stay CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# Treat data/build outputs as binary (no diffing, no EOL munging).
+*.parquet binary
+*.feather binary
+*.arrow binary
+*.sas7bdat binary
+*.sas7bndx binary
+*.pdf binary
+*.xlsx binary
