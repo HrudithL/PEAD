@@ -7,7 +7,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from .config import Config
+from ..config import Config
 
 
 def locate_events(events: pd.DataFrame, rets: pd.DataFrame, calendar: pd.DatetimeIndex,

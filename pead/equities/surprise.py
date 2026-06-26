@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .config import Config
+from ..config import Config
 
 # Below this absolute STDEV the standardized surprise blows up; treat as invalid.
 _MIN_STDEV = 1e-6

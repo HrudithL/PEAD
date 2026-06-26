@@ -6,7 +6,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from .config import Config
+from ..config import Config
 
 # ---------------------------------------------------------------------------
 # IBES earnings announcements

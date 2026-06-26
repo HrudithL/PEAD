@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from pead.config import Config
-from pead import surprise
+from pead.equities import surprise
 
 
 def _events(anntims):
