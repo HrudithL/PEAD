@@ -25,12 +25,7 @@ import os
 import re
 from typing import Optional
 
-# Data Source lives one level above the PEAD package directory:
-#   BEI/Data Source/...
-#   BEI/PEAD/pead/  (this file)
-_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
-_BEI_DIR = os.path.dirname(os.path.dirname(_PKG_DIR))
-_DATA_DIR = os.path.join(_BEI_DIR, "Data Source")
+from .io import resolver
 
 # ---------------------------------------------------------------------------
 # Group definitions
@@ -98,8 +93,8 @@ _members_cache: dict[str, list[str]] = {}
 
 
 def _load_csv_tickers(filename: str) -> list[str]:
-    """Read the ticker column from a constituent CSV in Data Source/."""
-    path = os.path.join(_DATA_DIR, filename)
+    """Read the ticker column from a constituent CSV (in-repo reference first)."""
+    path = str(resolver.constituent_csv(filename))
     out: list[str] = []
     with open(path, newline="", encoding="utf-8-sig") as fh:
         reader = csv.reader(fh)
