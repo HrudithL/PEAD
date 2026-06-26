@@ -19,7 +19,7 @@ from __future__ import annotations
 import sys
 
 from pead.config import parse_args
-from pead.analysis import run
+from pead.equities.analysis import run
 
 
 def main() -> None:
