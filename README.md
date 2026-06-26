@@ -49,4 +49,18 @@ python run_pead.py --help   # equities study
 | `data/derived/`  | Extracted event panels (gitignored cache) |
 | `docs/`          | Architecture + data dictionary |
 
-> Detailed docs land in `docs/` (added in a later PR).
+## Running the options pipeline
+
+```bash
+pip install -r requirements.txt          # includes duckdb + pyarrow
+cp .env.example .env                      # point OPTIONMETRICS_DIR at the parquet drive
+python run_pead_options.py --tickers AAPL,MSFT --start-year 2008 --end-year 2010
+```
+
+The native C++/CUDA engine is optional — until `native/build/pead_engine` is
+built, a pandas fallback runs automatically. See `native/README.md`.
+
+## Documentation
+
+- [`docs/architecture.md`](docs/architecture.md) — data plane, the four pipeline stages, why DuckDB + a native engine
+- [`docs/data_dictionary.md`](docs/data_dictionary.md) — OptionMetrics / IBES tables and the derived schemas
