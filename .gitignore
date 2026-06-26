@@ -1,0 +1,61 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Testing / tooling caches ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- Environment / secrets ----
+.env
+.env.local
+
+# ---- Data plane (never committed) ----
+# Raw equities + OptionMetrics data live OUTSIDE the repo and are reached via
+# OPTIONMETRICS_DIR / BEI_DATA_DIR (see .env.example). Large/derived artifacts
+# stay local.
+data/derived/
+*.parquet
+*.feather
+*.arrow
+# Big source CSVs (small reference lists under data/reference/ are force-added)
+*.sas7bdat
+*.sas7bndx
+
+# ---- Run artifacts ----
+outputs/
+scratch/
+_verify/
+cache/
+
+# ---- Native build ----
+native/build/
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.exe
