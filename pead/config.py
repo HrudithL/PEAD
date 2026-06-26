@@ -8,19 +8,16 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from . import ticker_groups
+from .io import resolver
 
-# Resolve default data locations relative to the repo layout:
-#   BEI/
-#     Data Source/IBES_Summary_2015_2024.csv
-#     Data Source/master_stock.csv
-#     PEAD/  (this package lives here)
+# Equities data lives OUTSIDE the repo and is resolved via BEI_DATA_DIR (see
+# .env.example). The resolver returns a best-guess path even when the data is
+# absent, so importing this module never fails.
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 _PEAD_DIR = os.path.dirname(_PKG_DIR)
-_BEI_DIR = os.path.dirname(_PEAD_DIR)
-_DATA_DIR = os.path.join(_BEI_DIR, "Data Source")
 
-DEFAULT_IBES = os.path.join(_DATA_DIR, "IBES_Summary_2015_2024.csv")
-DEFAULT_STOCK = os.path.join(_DATA_DIR, "master_stock.csv")
+DEFAULT_IBES = str(resolver.ibes_path("IBES_Summary_2015_2024.csv"))
+DEFAULT_STOCK = str(resolver.master_stock_path("master_stock.csv"))
 DEFAULT_OUTPUT_DIR = os.path.join(_PEAD_DIR, "outputs")
 DEFAULT_CACHE_DIR = os.path.join(_PEAD_DIR, "cache")
 
