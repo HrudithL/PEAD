@@ -93,6 +93,42 @@ def build_event_panel(cfg: DriftMLConfig) -> dict:
     }
 
 
+def industry_drift_base(pos0: pd.Series, industry: pd.Series, drift: pd.Series,
+                        horizon: int) -> pd.Series:
+    """PIT trailing average realized drift of an event's industry.
+
+    For each event, the equal-weighted mean of the realized drift of *prior*
+    events in the same industry whose [+1, +horizon] label window has already
+    closed on or before this event's day 0 (``close_pos = pos0 + horizon`` of a
+    prior event must be ``<= pos0`` of the current one). This is strictly causal
+    -- it never uses an event's own (still-open) outcome or any contemporaneous
+    one -- so it is leakage-safe across walk-forward folds. Events with an
+    unknown industry, or with no qualifying priors, get NaN.
+    """
+    idx = pos0.index
+    res = pd.Series(np.nan, index=idx, dtype="float64")
+    work = pd.DataFrame({
+        "pos0": pd.to_numeric(pos0, errors="coerce"),
+        "ind": industry.astype("object"),
+        "drift": pd.to_numeric(drift, errors="coerce"),
+    })
+    work["close"] = work["pos0"] + int(horizon)
+
+    for ind_val, g in work.dropna(subset=["ind"]).groupby("ind", observed=True):
+        priors = g.dropna(subset=["drift", "close"]).sort_values("close")
+        if priors.empty:
+            continue
+        closes = priors["close"].to_numpy()
+        cum = np.cumsum(priors["drift"].to_numpy())
+        for row_idx, p0 in g["pos0"].items():
+            if not np.isfinite(p0):
+                continue
+            k = int(np.searchsorted(closes, p0, side="right"))
+            if k > 0:
+                res.at[row_idx] = float(cum[k - 1] / k)
+    return res
+
+
 def build_event_features(cfg: DriftMLConfig, *, write: bool = True) -> pd.DataFrame:
     """Full assembly: events -> labels + features (+WRDS) -> as-of joins -> parquet.
 
@@ -113,6 +149,12 @@ def build_event_features(cfg: DriftMLConfig, *, write: bool = True) -> pd.DataFr
     meta = ev[[c for c in _META_COLS if c in ev.columns]].copy()
     out = pd.concat([meta, feat_df, label_df], axis=1)
     out = out.loc[:, ~out.columns.duplicated()]
+
+    # Fill the trailing-industry-drift feature now that realized labels exist
+    # (features.py emits it as NaN because it cannot see the labels).
+    if {"ff12", "drift_raw", "pos0"}.issubset(out.columns):
+        out["industry_drift_base"] = industry_drift_base(
+            out["pos0"], out["ff12"], out["drift_raw"], cfg.primary_horizon)
 
     if write:
         _save(out, cfg.derived_path())

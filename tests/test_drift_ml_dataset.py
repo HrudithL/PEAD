@@ -46,6 +46,28 @@ def test_feature_columns_excludes_labels_and_meta():
     assert set(cols) == {"sue_std", "ear", "mktcap"}
 
 
+def test_industry_drift_base_is_causal_prior_industry_mean():
+    pos0 = pd.Series([10, 100, 200, 100], index=[0, 1, 2, 3])
+    industry = pd.Series(["X", "X", "X", "Y"], index=[0, 1, 2, 3])
+    drift = pd.Series([0.1, 0.2, 0.3, 0.9], index=[0, 1, 2, 3])
+    out = dataset.industry_drift_base(pos0, industry, drift, horizon=60)
+    # close = pos0 + 60 -> [70, 160, 260, 160]
+    assert pd.isna(out[0])                       # no prior window closed by pos0=10
+    assert np.isclose(out[1], 0.1)               # only event0 (close 70 <= 100)
+    assert np.isclose(out[2], (0.1 + 0.2) / 2)   # events 0 and 1 closed by pos0=200
+    assert pd.isna(out[3])                        # lone firm in industry Y -> no priors
+
+
+def test_industry_drift_base_never_uses_own_or_future_outcome():
+    # Even with a finite own drift, an event cannot see its own (still-open)
+    # window: its close = pos0 + horizon > pos0, so it is never a prior.
+    pos0 = pd.Series([50, 60], index=[0, 1])
+    industry = pd.Series(["X", "X"], index=[0, 1])
+    drift = pd.Series([0.5, 0.5], index=[0, 1])
+    out = dataset.industry_drift_base(pos0, industry, drift, horizon=60)
+    assert out.isna().all()                       # neither prior has closed in time
+
+
 def test_build_event_features_end_to_end_synthetic(synthetic):
     cfg = DriftMLConfig(
         ibes_path=synthetic["ibes_path"],

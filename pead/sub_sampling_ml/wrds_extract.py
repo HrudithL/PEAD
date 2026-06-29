@@ -153,6 +153,9 @@ def extract_compustat_fundq(gvkeys: list[str], cfg: DriftMLConfig) -> pd.DataFra
     base_cols = [
         "gvkey", "datadate", "rdq", "fqtr", "fyearq", "atq", "ceqq", "niq",
         "revtq", "cogsq", "saleq", "dlttq", "dlcq", "xrdq",
+        # Balance-sheet accruals legs (Sloan 1996): current assets/liabilities,
+        # cash, current debt, taxes payable, depreciation.
+        "actq", "lctq", "cheq", "txpq", "dpq",
     ]
     cached = _read_cache("compustat_fundq", cfg)
     if cached is not None:
