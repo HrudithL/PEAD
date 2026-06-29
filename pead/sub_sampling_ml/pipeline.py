@@ -53,9 +53,16 @@ def descriptive_comparison(df: pd.DataFrame, feature_cols: list[str],
 
 def run(cfg: DriftMLConfig) -> str:
     """Run the full pipeline and return the path to the generated PDF report."""
-    _log(f"Building event-feature-label table {cfg.start_year}-{cfg.end_year} "
-         f"(WRDS={'on' if cfg.use_wrds else 'off'}) ...")
-    df = dataset.build_event_features(cfg, write=True)
+    df = None
+    if cfg.use_cache:
+        df = dataset.load_event_features(cfg)
+        if df is not None:
+            _log(f"Loaded cached event_features ({len(df):,} rows) "
+                 f"-> {cfg.derived_path()} (use --no-cache to rebuild).")
+    if df is None:
+        _log(f"Building event-feature-label table {cfg.start_year}-{cfg.end_year} "
+             f"(WRDS={'on' if cfg.use_wrds else 'off'}) ...")
+        df = dataset.build_event_features(cfg, write=True)
     _log(f"  {len(df):,} events x {df.shape[1]:,} columns.")
 
     feature_cols = dataset.feature_columns(df)

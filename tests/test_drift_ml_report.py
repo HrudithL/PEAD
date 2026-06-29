@@ -13,7 +13,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from pead.sub_sampling_ml import report, pipeline
+from pead.sub_sampling_ml import report, pipeline, dataset
 from pead.sub_sampling_ml.config import DriftMLConfig
 
 
@@ -127,8 +127,30 @@ def test_pipeline_run_end_to_end_synthetic(synthetic):
         horizons=(5,),
         n_deciles=5,
         use_wrds=False,
+        use_cache=False,           # deterministic: always rebuild in tests
         fit_classifier=False,
     )
     pdf_path = pipeline.run(cfg)
     assert os.path.exists(pdf_path)
     assert os.path.exists(os.path.join(cfg.output_dir, "feature_importance.csv"))
+
+
+def test_pipeline_uses_cache_when_available(synthetic, monkeypatch):
+    cfg = DriftMLConfig(
+        ibes_path=synthetic["ibes_path"],
+        stock_path=synthetic["stock_path"],
+        output_dir=synthetic["output_dir"],
+        start_year=2019, end_year=2021,
+        horizons=(5,), n_deciles=5,
+        use_wrds=False, use_cache=True, fit_classifier=False,
+    )
+    cached = dataset.build_event_features(cfg, write=False)
+
+    monkeypatch.setattr(dataset, "load_event_features", lambda c: cached)
+
+    def _must_not_build(*a, **k):
+        raise AssertionError("build_event_features called despite a warm cache")
+
+    monkeypatch.setattr(dataset, "build_event_features", _must_not_build)
+    pdf_path = pipeline.run(cfg)
+    assert os.path.exists(pdf_path)
