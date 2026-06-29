@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "subsample-drift", "feat/**", "docs/**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests
+        # WRDS is never reachable in CI; the drift-ML tests monkeypatch the
+        # connection, so the full suite runs offline.
+        run: pytest -q
