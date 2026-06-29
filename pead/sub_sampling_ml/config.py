@@ -90,6 +90,10 @@ class DriftMLConfig:
     wrds_cache_dir: Optional[str] = None  # None -> resolver default (Data Source)
     refresh_wrds: bool = False  # ignore cache and re-pull
 
+    # Reuse a previously built event_features.parquet instead of rebuilding the
+    # whole event x feature x label table on every run.
+    use_cache: bool = True
+
     def __post_init__(self) -> None:
         _load_dotenv()
         if self.wrds_username is None:
@@ -188,6 +192,8 @@ def parse_args(argv: Optional[list[str]] = None) -> DriftMLConfig:
                    help="Skip CRSP/Compustat families; use repo-only features.")
     p.add_argument("--refresh-wrds", action="store_true",
                    help="Ignore the cached WRDS CSVs and re-pull from the API.")
+    p.add_argument("--no-cache", action="store_true",
+                   help="Rebuild event_features.parquet instead of reusing the cache.")
     p.add_argument("--no-classifier", action="store_true")
     p.add_argument("--wrds-username", default=None)
 
@@ -212,6 +218,7 @@ def parse_args(argv: Optional[list[str]] = None) -> DriftMLConfig:
         min_train_quarters=args.min_train_quarters,
         use_wrds=not args.no_wrds,
         refresh_wrds=args.refresh_wrds,
+        use_cache=not args.no_cache,
         fit_classifier=not args.no_classifier,
         wrds_username=args.wrds_username,
     )
