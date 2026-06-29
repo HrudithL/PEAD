@@ -227,8 +227,11 @@ Because each label spans 60 future trading days, naive k-fold leaks. We use:
   quarters, test on the next, **purge** any training event whose [+1,+60] window
   overlaps the test period, and **embargo** ~3 months after each test block.
 - Features cross-sectionally standardized **within the training window only**.
-- All time-dependent encodings (target encoding, `industry_drift_base`) fit on
-  train, applied to test.
+- Time-dependent encodings (e.g. target encoding) are fit on train, applied to
+  test. `industry_drift_base` is computed **causally** at dataset assembly: each
+  event only sees the realized drift of prior same-industry events whose
+  `[+1, +H]` window has already closed on/before its day 0, so it is leakage-safe
+  across folds without a per-fold refit.
 
 **Metrics (out-of-sample):**
 | Metric | Question it answers |
@@ -295,5 +298,6 @@ run_drift_ml.py      # CLI entry point
 | 3 | Options features (5.6) | **Deferred to v2.** Not extracted or modeled in the initial build. |
 | 4 | Report format | **PDF** (matplotlib), matching the repo convention. |
 
-All four blocking questions are resolved; the spec is build-ready. Build begins
-only when explicitly instructed.
+All four blocking questions are resolved. The full pipeline (scaffold → labels →
+features → WRDS/dataset → model → attribution → report) is implemented across the
+stacked PRs.
