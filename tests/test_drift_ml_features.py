@@ -33,6 +33,8 @@ def _make_events(cal, prices):
         "medest": [1.0, 1.0],
         "stdev": [0.5, 0.4],
         "numest": [8, 5],
+        "numup": [6, 1],
+        "numdown": [1, 3],
     })
     return ev
 
@@ -93,6 +95,87 @@ def test_categorical_columns_have_category_dtype():
     for c in F.CATEGORICAL_FEATURES:
         assert c in feats.columns
         assert str(feats[c].dtype) == "category", c
+
+def test_revision_net_uses_numup_numdown():
+    _, feats, _ = _build()
+    # AAA: (6 - 1) / 8 ; BBB: (1 - 3) / 5
+    assert np.isclose(feats.loc[0, "revision_net"], 5 / 8)
+    assert np.isclose(feats.loc[1, "revision_net"], -2 / 5)
+
+
+def _make_wrds_panels(cal):
+    """Minimal WRDS panels for two same-industry firms with 5+ fundq quarters."""
+    link = pd.DataFrame({
+        "ticker": ["AAA", "BBB"],
+        "permno": [101, 102],
+        "gvkey": ["1001", "1002"],
+    })
+    company = pd.DataFrame({          # same SIC -> same FF12 industry
+        "gvkey": ["1001", "1002"],
+        "gsector": [45, 45],
+        "sic": [3674, 3674],
+    })
+    rdqs = pd.bdate_range("2017-01-15", periods=8, freq="63D")
+    rows = []
+    for gv, atq0 in (("1001", 1000.0), ("1002", 2000.0)):
+        for k, rdq in enumerate(rdqs):
+            rows.append({
+                "gvkey": gv, "rdq": rdq,
+                "atq": atq0 + 50 * k, "ceqq": 400 + 10 * k, "niq": 50 + k,
+                "revtq": 300 + 5 * k, "cogsq": 180 + 2 * k,
+                "saleq": 300 + 5 * k, "dlttq": 100 + 3 * k, "dlcq": 20 + k,
+                "xrdq": 15.0, "emp": 5.0,
+                "actq": 500 + 8 * k, "lctq": 200 + 4 * k, "cheq": 60 + k,
+                "txpq": 10 + k, "dpq": 12.0,
+            })
+    fundq = pd.DataFrame(rows)
+    return {"link": link, "company": company, "fundq": fundq}
+
+
+def _events_for_panels(cal, prices):
+    ev = _make_events(cal, prices)
+    # Both events late enough that >=5 prior fundq quarters exist (rdq < anndats).
+    ev["anndats"] = [cal[_POS0_FULL], cal[_POS0_FULL]]
+    ev["pos0"] = [_POS0_FULL, _POS0_FULL]
+    ev["oftic"] = ["AAA", "BBB"]
+    return ev
+
+
+def test_leverage_nan_when_debt_fields_absent():
+    cal, rets, prices, bench, _ = _make_data()
+    ev = _events_for_panels(cal, prices)
+    panels = _make_wrds_panels(cal)
+    panels["fundq"] = panels["fundq"].drop(columns=["dlttq", "dlcq"])
+    cfg = DriftMLConfig()
+    feats = F.build_features(ev, rets, prices, cal, bench, cfg, wrds_panels=panels)
+    assert feats["leverage"].isna().all()        # no 0-instead-of-NaN
+
+
+def test_leverage_and_accruals_computed_with_panels():
+    cal, rets, prices, bench, _ = _make_data()
+    ev = _events_for_panels(cal, prices)
+    panels = _make_wrds_panels(cal)
+    cfg = DriftMLConfig()
+    feats = F.build_features(ev, rets, prices, cal, bench, cfg, wrds_panels=panels)
+    assert feats["leverage"].notna().all() and (feats["leverage"] > 0).all()
+    assert feats["accruals"].notna().all()       # balance-sheet accruals filled
+    assert feats["gics_sector"].notna().all()
+
+
+def test_industry_mom_is_peer_average_excluding_self():
+    cal, rets, prices, bench, R = _make_data()
+    ev = _events_for_panels(cal, prices)
+    panels = _make_wrds_panels(cal)
+    cfg = DriftMLConfig()
+    feats = F.build_features(ev, rets, prices, cal, bench, cfg, wrds_panels=panels)
+    # Two firms in one FF12 group -> each one's industry_mom is the OTHER firm's
+    # trailing [-21,-1] return (self excluded).
+    p0 = _POS0_FULL
+    bbb_tr = np.prod(1.0 + R[p0 - 21:p0, 1]) - 1.0
+    aaa_tr = np.prod(1.0 + R[p0 - 21:p0, 0]) - 1.0
+    assert np.isclose(feats.loc[0, "industry_mom"], bbb_tr)
+    assert np.isclose(feats.loc[1, "industry_mom"], aaa_tr)
+
 
 def test_build_features_returns_union_of_all_families():
     _, feats, _ = _build()

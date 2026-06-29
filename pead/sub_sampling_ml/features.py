@@ -272,7 +272,10 @@ def sector_features(ev: pd.DataFrame, rets: pd.DataFrame,
     out["ff12"] = pd.Series(np.nan, index=ev.index, dtype="object")
     out["ff48"] = pd.Series(np.nan, index=ev.index, dtype="object")
     out["industry_mom"] = np.nan
-    # Time-dependent and fit-on-train only -> the model layer fills this in.
+    # PIT trailing industry drift needs realized labels, which features cannot
+    # see -> emitted as NaN here and filled causally at dataset assembly
+    # (dataset.build_event_features), using only prior events whose drift window
+    # has already closed.
     out["industry_drift_base"] = np.nan
 
     if not _wrds_ok(wrds_panels):
@@ -302,34 +305,61 @@ def sector_features(ev: pd.DataFrame, rets: pd.DataFrame,
     return out
 
 def _industry_mom(ev, rets, calendar, link, g2sic) -> pd.Series:
-    """Equal-weighted peer-industry [-21,-1] return as of each event (FF12 group)."""
+    """Equal-weighted peer-industry [-21,-1] return as of each event (FF12 group).
+
+    Vectorized: each ticker's trailing 21-day compounded return is computed for
+    every calendar day at once via cumulative log-returns, then averaged within
+    each FF12 group per day. The own-firm leg is removed from its group mean so
+    the feature is a true *peer* return. O(days x tickers), not O(events x
+    universe).
+    """
     res = pd.Series(np.nan, index=ev.index)
     try:
-        t2p, t2g = _link_maps(link)
-        universe_ff = {}
-        for tic, g in t2g.items():
-            universe_ff[tic] = _ff12_from_sic(g2sic.get(g))
-        ret_cols = {c: i for i, c in enumerate(rets.columns)}
+        _, t2g = _link_maps(link)
+        cols = list(rets.columns)
+        col_idx = {c: i for i, c in enumerate(cols)}
+        ff_of_col = np.array([_ff12_from_sic(g2sic.get(t2g.get(str(c).upper())))
+                              for c in cols], dtype=object)
+
         ret_np = rets.to_numpy(dtype=float)
-        n = len(calendar)
+        n_days = ret_np.shape[0]
+        if n_days < 22:
+            return res
+
+        # trailing[t] over offsets [t-21, t-1] = prod(1+r[t-21..t-1]) - 1,
+        # treating missing daily returns as flat (mirrors _cumret's nan->0).
+        # S is a zero-prepended prefix sum so sum(log1p[a..b]) = S[b+1] - S[a];
+        # the window [t-21, t-1] is therefore S[t] - S[t-21].
+        log1p = np.log1p(np.nan_to_num(ret_np, nan=0.0))
+        S = np.concatenate([np.zeros((1, ret_np.shape[1])), np.cumsum(log1p, axis=0)])
+        trailing = np.full_like(ret_np, np.nan)
+        trailing[21:] = np.exp(S[21:n_days] - S[0:n_days - 21]) - 1.0
+
+        # Per-FF12-group, per-day finite sum and count for an equal-weight mean.
+        finite = np.isfinite(trailing)
+        groups = {ff for ff in ff_of_col if ff is not None and ff == ff}  # drop NaN
+        grp_sum: dict[object, np.ndarray] = {}
+        grp_cnt: dict[object, np.ndarray] = {}
+        for ff in groups:
+            mask = (ff_of_col == ff)
+            sub = np.where(finite[:, mask], trailing[:, mask], 0.0)
+            grp_sum[ff] = sub.sum(axis=1)
+            grp_cnt[ff] = finite[:, mask].sum(axis=1)
+
         for i in ev.index:
             p0 = int(ev.at[i, "pos0"])
             own = str(ev.at[i, "oftic"]).upper()
-            ff = universe_ff.get(own)
-            if ff is None or not (0 <= p0 < n):
+            ff = _ff12_from_sic(g2sic.get(t2g.get(own)))
+            if ff is None or ff != ff or ff not in grp_sum or not (0 <= p0 < n_days):
                 continue
-            vals = []
-            for tic, fff in universe_ff.items():
-                if fff != ff or tic == own:
-                    continue
-                ci = ret_cols.get(tic)
-                if ci is None:
-                    continue
-                r = _cumret(ret_np[:, ci], p0 - 21, p0 - 1)
-                if np.isfinite(r):
-                    vals.append(r)
-            if vals:
-                res.at[i] = float(np.mean(vals))
+            s = grp_sum[ff][p0]
+            c = grp_cnt[ff][p0]
+            oc = col_idx.get(own)
+            if oc is not None and finite[p0, oc]:   # remove own firm from the mean
+                s -= trailing[p0, oc]
+                c -= 1
+            if c > 0:
+                res.at[i] = float(s / c)
     except Exception:
         return res
     return res
@@ -393,7 +423,11 @@ def fundamental_features(ev: pd.DataFrame, cfg: DriftMLConfig,
 
             out.at[i, "roa"] = niq / atq if atq else np.nan
             out.at[i, "gross_margin"] = (revtq - cogsq) / revtq if revtq else np.nan
-            out.at[i, "leverage"] = (np.nansum([dlttq, dlcq])) / atq if atq else np.nan
+            # Missing debt fields -> NaN leverage (not 0): nansum of all-NaN is 0,
+            # which would falsely read as a debt-free firm.
+            if np.isfinite(dlttq) or np.isfinite(dlcq):
+                debt = float(np.nansum([dlttq, dlcq]))
+                out.at[i, "leverage"] = debt / atq if atq else np.nan
             out.at[i, "rd_intensity"] = xrdq / sales if sales else np.nan
             out.at[i, "n_employees"] = _safe_log(emp)
 
@@ -407,6 +441,27 @@ def fundamental_features(ev: pd.DataFrame, cfg: DriftMLConfig,
                 atq_p, sales_p = pv("atq"), (pv("saleq") if col("saleq") else pv("revtq"))
                 out.at[i, "asset_growth"] = atq / atq_p - 1.0 if atq_p else np.nan
                 out.at[i, "sales_growth"] = sales / sales_p - 1.0 if sales_p else np.nan
+
+                # 5.5 balance-sheet accruals (Sloan 1996), year-over-year change in
+                # non-cash working capital net of depreciation, scaled by avg assets.
+                # Requires current assets + current liabilities (and their lags);
+                # cash / current-debt / taxes-payable / depreciation default to 0
+                # when a field is absent (standard practice), but the two core
+                # working-capital legs must be present or accruals stays NaN.
+                actq, lctq = v("actq"), v("lctq")
+                actq_p, lctq_p = pv("actq"), pv("lctq")
+                if np.isfinite(actq) and np.isfinite(lctq) and \
+                        np.isfinite(actq_p) and np.isfinite(lctq_p) and atq and atq_p:
+                    d_ca = actq - actq_p
+                    d_cash = np.nansum([v("cheq"), -pv("cheq")])
+                    d_cl = lctq - lctq_p
+                    d_std = np.nansum([v("dlcq"), -pv("dlcq")])
+                    d_tp = np.nansum([v("txpq"), -pv("txpq")])
+                    dep_ttm = pd.to_numeric(grp[col("dpq")], errors="coerce").tail(4).sum() \
+                        if col("dpq") else 0.0
+                    delta_wc = (d_ca - d_cash) - (d_cl - d_std - d_tp)
+                    avg_at = (atq + atq_p) / 2.0
+                    out.at[i, "accruals"] = (delta_wc - dep_ttm) / avg_at if avg_at else np.nan
 
             nic = col("niq")
             if nic is not None:
