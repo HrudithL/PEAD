@@ -48,6 +48,9 @@ data/derived/
 # ---- Run artifacts ----
 outputs/
 scratch/
+
+# ---- Trained model artifacts ----
+models/
 _verify/
 cache/
 
