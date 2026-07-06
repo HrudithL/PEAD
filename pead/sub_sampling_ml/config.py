@@ -168,9 +168,22 @@ def _parse_horizons(raw: str) -> tuple[int, ...]:
 
 def parse_args(argv: Optional[list[str]] = None) -> DriftMLConfig:
     """Build a :class:`DriftMLConfig` from CLI flags."""
+    p = build_parser()
+    args = p.parse_args(argv)
+    return config_from_args(args)
+
+
+def build_parser(*, prog: str = "run_drift_ml",
+                 description: str = "Sub-sample drift attribution "
+                                    "(feature -> realized PEAD).") -> argparse.ArgumentParser:
+    """Return the shared DriftMLConfig argument parser.
+
+    Serving CLIs (``run_train_drift_model.py`` / ``run_predict_drift.py`` /
+    ``run_backtest_drift_model.py``) build this parser and then attach their
+    own flags on top, so ``--help`` shows every option in one place.
+    """
     p = argparse.ArgumentParser(
-        prog="run_drift_ml",
-        description="Sub-sample drift attribution (feature -> realized PEAD).",
+        prog=prog, description=description,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--ibes", dest="ibes_path", default=DEFAULT_IBES)
@@ -196,11 +209,13 @@ def parse_args(argv: Optional[list[str]] = None) -> DriftMLConfig:
                    help="Rebuild event_features.parquet instead of reusing the cache.")
     p.add_argument("--no-classifier", action="store_true")
     p.add_argument("--wrds-username", default=None)
+    return p
 
-    args = p.parse_args(argv)
+
+def config_from_args(args: argparse.Namespace) -> DriftMLConfig:
+    """Turn a parsed ``argparse.Namespace`` from :func:`build_parser` into a config."""
     tickers = _parse_tickers(args.tickers)
     ticker_spec = args.tickers if (args.tickers and tickers) else None
-
     return DriftMLConfig(
         ibes_path=args.ibes_path,
         stock_path=args.stock_path,
