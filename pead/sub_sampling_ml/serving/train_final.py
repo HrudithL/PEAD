@@ -74,9 +74,21 @@ def _restrict_universe(df: pd.DataFrame, universe: str) -> pd.DataFrame:
     return df[df["oftic"].astype(str).str.upper().isin(tickers)].copy()
 
 
-def _restrict_cutoff(df: pd.DataFrame, cutoff_date: str) -> pd.DataFrame:
+def _restrict_cutoff(df: pd.DataFrame, cutoff_date: str, horizon: int) -> pd.DataFrame:
+    """Keep only events whose label window has *closed* on or before cutoff.
+
+    Filtering on ``anndats <= cutoff`` alone is not enough: the label is
+    CAR[+1, +horizon], so an event dated right before the cutoff can still
+    have its label realized using prices *after* the cutoff whenever the
+    parquet was built with a longer price history. That leaks post-cutoff
+    returns into an as-of fit. Purge the final horizon window using the same
+    conservative trading-day -> calendar-day approximation as
+    :func:`_industry_history`.
+    """
     cutoff = pd.Timestamp(cutoff_date)
-    return df[pd.to_datetime(df["anndats"]) <= cutoff].copy()
+    anndats = pd.to_datetime(df["anndats"])
+    close_date = anndats + pd.to_timedelta(int(round(horizon * 7 / 5)), unit="D")
+    return df[(anndats <= cutoff) & (close_date <= cutoff)].copy()
 
 
 # ---------------------------------------------------------- schema
@@ -219,14 +231,14 @@ def train_final(cfg: DriftMLConfig, *,
     df_all = _load_or_build(cfg)
     _log(f"Full parquet: {len(df_all):,} events x {df_all.shape[1]:,} cols.")
 
+    horizon = cfg.primary_horizon
     df = _restrict_universe(df_all, universe)
-    df = _restrict_cutoff(df, cutoff_date)
+    df = _restrict_cutoff(df, cutoff_date, horizon)
     _log(f"After universe='{universe}' and cutoff={cutoff_date}: {len(df):,} events.")
 
     if df.empty:
         raise SystemExit("Training set is empty -- widen universe or cutoff.")
 
-    horizon = cfg.primary_horizon
     raw_col = f"drift_raw_h{horizon}"
     z_col = f"drift_z_h{horizon}"
     cls_col = f"drift_class_h{horizon}"

@@ -179,12 +179,6 @@ class DriftModel:
         ``feature_cols`` that had a non-null value in ``feats``.
         """
         X = pd.DataFrame(index=feats.index)
-        # coverage over original (pre-alignment) values
-        present = 0
-        for col in self.schema.feature_cols:
-            if col in feats.columns and feats[col].notna().any():
-                present += 1
-        coverage = present / max(1, len(self.schema.feature_cols))
 
         for col in self.schema.numeric_cols:
             s = pd.to_numeric(feats.get(col, pd.Series(np.nan, index=feats.index)),
@@ -200,6 +194,12 @@ class DriftModel:
 
         # Keep exact training column order.
         X = X[self.schema.feature_cols]
+
+        # Coverage over the *aligned* matrix: a value present in feats but
+        # not among the training-time category levels becomes NaN above, and
+        # should count against coverage rather than for it.
+        present = sum(1 for col in self.schema.feature_cols if X[col].notna().any())
+        coverage = present / max(1, len(self.schema.feature_cols))
         return X, coverage
 
     # ------------------------------------------------------------ predict
@@ -212,12 +212,6 @@ class DriftModel:
         for name, booster in sorted(self.quantile_boosters.items()):
             out[f"drift_raw_pred_{name}"] = booster.predict(X)
 
-        if "q50" in self.quantile_boosters:
-            out["expected_drift"] = out["drift_raw_pred_q50"]
-        if "q10" in self.quantile_boosters and "q90" in self.quantile_boosters:
-            out["interval_low"] = out["drift_raw_pred_q10"]
-            out["interval_high"] = out["drift_raw_pred_q90"]
-
         # Enforce monotonicity of the quantile family: per-row sort so
         # crossings from independently trained boosters cannot flip an
         # interval inside-out.
@@ -225,6 +219,15 @@ class DriftModel:
         if qcols:
             sorted_vals = np.sort(out[qcols].to_numpy(), axis=1)
             out[qcols] = sorted_vals
+
+        # Derive from the sorted (monotone) quantiles -- doing this before the
+        # sort left expected_drift/interval_* inconsistent with the corrected
+        # q10/q50/q90 whenever the independently trained boosters crossed.
+        if "q50" in self.quantile_boosters:
+            out["expected_drift"] = out["drift_raw_pred_q50"]
+        if "q10" in self.quantile_boosters and "q90" in self.quantile_boosters:
+            out["interval_low"] = out["drift_raw_pred_q10"]
+            out["interval_high"] = out["drift_raw_pred_q90"]
 
         if self.z_booster is not None:
             out["drift_z_pred"] = self.z_booster.predict(X)
@@ -242,7 +245,8 @@ class DriftModel:
     # ------------------------------------------------------------ metadata
     def _version_tag(self) -> str:
         try:
-            ts = pd.Timestamp(self.metadata.cutoff_date).strftime("%Yq%q")
+            cutoff = pd.Timestamp(self.metadata.cutoff_date)
+            ts = f"{cutoff.year}q{cutoff.quarter}"
         except Exception:
             ts = "asof"
         return f"{ts}_{self.metadata.git_sha}"

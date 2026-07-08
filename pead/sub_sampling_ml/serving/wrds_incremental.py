@@ -137,31 +137,52 @@ def _pick_gvkey(df: pd.DataFrame) -> Optional[str]:
 
 
 def ensure_crsp_daily(permno: int, cfg: DriftMLConfig) -> pd.DataFrame:
-    """Return CRSP daily rows for ``permno``, pulling & appending if missing."""
+    """Return CRSP daily rows for ``permno``, pulling/appending if missing or stale.
+
+    A cache hit only short-circuits once it actually covers through the
+    prediction/config date range -- otherwise a cache built through 2024
+    would be reused as-is (stale liquidity/book-to-market inputs) to score a
+    2025 announcement. When stale, pull just the missing tail and append.
+    """
     permno = int(permno)
     cache = _read_full_cache("crsp_daily", cfg)
+    hit = pd.DataFrame()
     if cache is not None and "permno" in cache.columns:
         hit = cache[pd.to_numeric(cache["permno"], errors="coerce") == permno]
-        if not hit.empty:
+
+    target_end = max(pd.Timestamp.today().normalize(),
+                     pd.Timestamp(f"{cfg.end_year}-12-31"))
+    if not hit.empty and "date" in hit.columns:
+        cached_through = pd.to_datetime(hit["date"]).max()
+        # CRSP typically lags a day or two; a small buffer avoids re-pulling
+        # on every call just because today's print hasn't posted yet.
+        if cached_through >= target_end - pd.Timedelta(days=5):
             return hit.reset_index(drop=True)
+        pull_start = (cached_through + pd.Timedelta(days=1)).date().isoformat()
+    else:
+        pull_start = f"{cfg.start_year - 2}-01-01"
 
     try:
         conn = wex.get_connection(cfg)
-        start = f"{cfg.start_year - 2}-01-01"
-        end = f"{cfg.end_year}-12-31"
         df = conn.raw_sql(
             "select permno, date, ret, abs(prc) as prc, vol, shrout "
             f"from crsp.dsf where permno = {permno} "
-            f"and date between '{start}' and '{end}'"
+            f"and date between '{pull_start}' and '{target_end.date().isoformat()}'"
         )
         df = wex._parse_dates(df)
     except Exception as exc:
         print(f"[drift-serve] WRDS crsp.dsf pull for permno={permno} failed: {exc}")
+        if not hit.empty:
+            return hit.reset_index(drop=True)
         return pd.DataFrame(columns=["permno", "date", "ret", "prc", "vol", "shrout"])
 
-    _append_and_write(cache, df, "crsp_daily", cfg,
-                      dedupe_on=["permno", "date"])
-    return df.reset_index(drop=True)
+    combined = _append_and_write(cache, df, "crsp_daily", cfg,
+                                 dedupe_on=["permno", "date"])
+    if "permno" in combined.columns:
+        out = combined[pd.to_numeric(combined["permno"], errors="coerce") == permno]
+    else:
+        out = df
+    return out.reset_index(drop=True)
 
 
 # ---------------------------------------------------------------- Compustat

@@ -13,7 +13,7 @@ mode) or from user-supplied overrides for `actual` / `meanest` / `stdev` etc.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 import numpy as np
@@ -99,8 +99,11 @@ def merge_inputs(user: EventInputs, cached: Optional[dict],
     """Combine user overrides with cached IBES fields.
 
     ``prefer_cache=True`` uses the cached value whenever the user didn't
-    explicitly supply one; ``prefer_cache=False`` uses the cached row only to
-    fill genuine gaps.
+    explicitly supply one. ``prefer_cache=False`` is the CLI's
+    ``--override-cache`` contract ("ignore cached IBES values, use
+    CLI-supplied only") -- the cache is not consulted at all, so any field
+    the caller omitted stays unset rather than silently falling back to a
+    stale cached row.
     """
     fields = ["anntime", "fpedats", "statpers", "cname", "actual", "meanest",
               "medest", "stdev", "numest", "numup", "numdown"]
@@ -113,11 +116,11 @@ def merge_inputs(user: EventInputs, cached: Optional[dict],
     }
     for name in fields:
         user_val = getattr(user, name)
-        cached_val = cached.get(cache_map[name]) if cached else None
+        cached_val = cached.get(cache_map[name]) if (cached and prefer_cache) else None
         if prefer_cache and cached_val is not None:
             chosen = cached_val if user_val is None else user_val
         else:
-            chosen = user_val if user_val is not None else cached_val
+            chosen = user_val
         resolved[cache_map[name]] = chosen
     return resolved
 
@@ -179,7 +182,13 @@ def _build_single_event_panel(ev_row: pd.DataFrame,
 
     rets, calendar, bench_ret, prices_wide = data_loader.build_return_panel(px, eq)
 
-    ev = event_study.locate_events(events, rets, calendar, eq)
+    # Serving only needs point-in-time features (window_pre history), not the
+    # drift_raw_h{H} label -- unlike the batch research pipeline, nothing here
+    # consumes the AR matrix. Locate against window_post=0 so a current or
+    # recent announcement doesn't get dropped for lacking H future trading
+    # days on the panel.
+    locate_cfg = replace(eq, window_post=0)
+    ev = event_study.locate_events(events, rets, calendar, locate_cfg)
     if ev.empty:
         raise SystemExit(
             f"Event {ticker} {ev_row['anndats'].iloc[0].date()} could not be "
@@ -188,11 +197,9 @@ def _build_single_event_panel(ev_row: pd.DataFrame,
     pre_price = event_study.attach_pre_price(ev, prices_wide, calendar)
     ev = surprise.compute_surprise(ev, pre_price, eq).reset_index(drop=True)
 
-    offsets, ar_mat = event_study.compute_ar_matrix(ev, rets, bench_ret, eq)
     return {
         "ev": ev, "rets": rets, "prices_wide": prices_wide,
         "calendar": calendar, "bench_ret": bench_ret,
-        "offsets": offsets, "ar_mat": ar_mat,
     }
 
 
@@ -268,6 +275,6 @@ def featurize_one(user: EventInputs, cfg: DriftMLConfig, *,
     return FeaturizeResult(
         features=feats.reset_index(drop=True),
         ev=panel["ev"],
-        used_cache=cached is not None,
+        used_cache=prefer_cache and cached is not None,
         cache_row=cached,
     )
