@@ -107,6 +107,7 @@ def run(cfg: DriftMLConfig) -> str:
     subgroups = attribution.subgroup_refits(df, feature_cols, cat_cols, cfg)
 
     descriptive = descriptive_comparison(df, feature_cols, n_deciles=cfg.n_deciles)
+    summary = report.feature_summary(df, feature_cols)
 
     results = {
         "df": df,
@@ -125,10 +126,15 @@ def run(cfg: DriftMLConfig) -> str:
         "consistency": consistency,
         "subgroups": subgroups,
         "descriptive": descriptive,
+        "feature_summary": summary,
     }
 
     csv_path = report.write_feature_importance_csv(consistency, cfg)
     _log(f"Wrote {csv_path}")
+    matrix_path = report.write_feature_matrix(df, cfg)
+    _log(f"Wrote {matrix_path} ({len(df):,} rows x {df.shape[1]:,} cols)")
+    summary_path = report.write_feature_summary(summary, cfg)
+    _log(f"Wrote {summary_path}")
     pdf_path = report.build_pdf(cfg, results)
     _log(f"Done -> {pdf_path}")
     return pdf_path

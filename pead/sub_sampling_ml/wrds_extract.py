@@ -35,6 +35,8 @@ _FAR_FUTURE = pd.Timestamp("2099-12-31")
 
 # Chunk size for the CRSP permno IN-list so the generated SQL stays reasonable.
 _PERMNO_CHUNK = 1000
+# Compustat gvkey IN-list chunk (gvkeys are shorter, so a larger chunk is fine).
+_GVKEY_CHUNK = 2000
 
 # Chunk size for the Compustat gvkey IN-list (fundq / company), same rationale.
 _GVKEY_CHUNK = 1000

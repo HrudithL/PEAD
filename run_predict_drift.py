@@ -9,6 +9,12 @@ surprise fields and asks *"use cached values or supply your own?"*. Pass
 ``--no-prompt --use-cache`` (or ``--no-prompt --override-cache --actual ...``)
 to run non-interactively.
 
+Pass ``--report`` (single-event mode only) to also write a two-page PDF next
+to the JSON output: model-level calibration/IC diagnostics (from the bundle's
+``backtest_results.csv``, if it was trained with ``--with-backtest``) plus
+this event's predicted quantile fan against the realized outcome, when the
+announcement is old enough for that outcome to already exist.
+
 Batch flow:
 
   python run_predict_drift.py --events events.csv --out predictions.csv
@@ -18,6 +24,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import pandas as pd
 
@@ -27,6 +34,8 @@ from pead.sub_sampling_ml.serving.featurize_one import (EventInputs,
 from pead.sub_sampling_ml.serving.predict import (COVERAGE_WARN_THRESHOLD,
                                                   load_model, predict_events,
                                                   predict_one)
+from pead.sub_sampling_ml.serving.prediction_report import write_prediction_report
+from pead.sub_sampling_ml.serving.train_final import latest_model_dir
 
 
 def _add_serving_args(p) -> None:
@@ -58,6 +67,11 @@ def _add_serving_args(p) -> None:
                    help="Force use of cached IBES values (with --no-prompt).")
     p.add_argument("--override-cache", action="store_true",
                    help="Ignore cached IBES values, use CLI-supplied only.")
+    # reporting (single-event mode)
+    p.add_argument("--report", nargs="?", const="", default=None,
+                   help="Write a two-page PDF report (model performance + "
+                        "this prediction vs. realized outcome). Optional "
+                        "path; default <ticker>_<anndate>_report.pdf.")
 
 
 def _prompt_cache_decision(cache_row: dict) -> bool:
@@ -104,6 +118,14 @@ def _run_single(args, cfg) -> int:
               f"{record['coverage']:.0%} is below the "
               f"{COVERAGE_WARN_THRESHOLD:.0%} threshold; treat with caution.",
               file=sys.stderr)
+
+    if args.report is not None:
+        model_dir = (Path(args.models_root) / args.version if args.version
+                    else latest_model_dir(args.models_root))
+        out_path = args.report or f"{record['ticker']}_{record['anndate']}_report.pdf"
+        write_prediction_report(record, cfg, model, out_path=out_path,
+                                model_dir=model_dir)
+        print(f"[drift-serve] Wrote report -> {out_path}")
     return 0
 
 

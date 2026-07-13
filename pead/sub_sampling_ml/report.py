@@ -33,6 +33,7 @@ from reportlab.platypus import (
 )
 
 from .config import DriftMLConfig
+from . import descriptions as D
 
 _NAVY = colors.HexColor("#1f4e79")
 _LIGHT = colors.HexColor("#dce6f1")
@@ -60,6 +61,15 @@ def _placeholder(msg: str):
     ax.axis("off")
     fig.tight_layout()
     return fig
+
+
+def _friendly(names) -> list[str]:
+    """Map feature column names to friendly chart labels (raw name in parens)."""
+    out = []
+    for n in names:
+        lab = D.feature_label(n)
+        out.append(f"{lab}\n({n})" if lab != n else str(n))
+    return out
 
 
 def fig_oos_metrics(results: dict, cfg: DriftMLConfig):
@@ -100,10 +110,11 @@ def fig_shap_summary(results: dict, cfg: DriftMLConfig, top_n: int = 20):
     direction = d.get("direction")
     colors_ = [_GREEN if (pd.notna(v) and v >= 0) else _RED
                for v in (direction if direction is not None else [np.nan] * len(d))]
-    fig, ax = plt.subplots(figsize=(9, max(3.5, 0.32 * len(d))))
-    ax.barh(d.index, d["importance"], color=colors_)
-    ax.set_xlabel("mean |SHAP|  (green = raises drift, red = lowers drift)")
+    fig, ax = plt.subplots(figsize=(9, max(3.5, 0.42 * len(d))))
+    ax.barh(_friendly(d.index), d["importance"], color=colors_)
+    ax.set_xlabel("mean |SHAP|  (green = higher feature raises drift, red = lowers drift)")
     ax.set_title(f"Top drivers of drift (CAR[+1,+{results.get('primary_horizon')}])")
+    ax.tick_params(axis="y", labelsize=7.5)
     fig.tight_layout()
     return fig
 
@@ -114,11 +125,12 @@ def fig_consistency(results: dict, cfg: DriftMLConfig, top_n: int = 20):
     if table is None or table.empty or "consistency_score" not in table.columns:
         return _placeholder("No consistency table (no fitted folds).")
     d = table.head(top_n).iloc[::-1]
-    fig, ax = plt.subplots(figsize=(9, max(3.5, 0.32 * len(d))))
-    ax.barh(d.index, d["consistency_score"], color=_BLUE)
+    fig, ax = plt.subplots(figsize=(9, max(3.5, 0.42 * len(d))))
+    ax.barh(_friendly(d.index), d["consistency_score"], color=_BLUE)
     ax.set_xlim(0, 1)
     ax.set_xlabel("consistency score (0\u20131): top-k stability + linear significance")
     ax.set_title("How consistently each feature ranks as a driver")
+    ax.tick_params(axis="y", labelsize=7.5)
     fig.tight_layout()
     return fig
 
@@ -129,12 +141,13 @@ def fig_descriptive(results: dict, cfg: DriftMLConfig, top_n: int = 12):
     if desc is None or desc.empty or "cohens_d" not in desc.columns:
         return _placeholder("No descriptive comparison (insufficient decile data).")
     d = desc.head(top_n).iloc[::-1]
-    fig, ax = plt.subplots(figsize=(9, max(3.5, 0.34 * len(d))))
-    ax.barh(d.index, d["cohens_d"],
+    fig, ax = plt.subplots(figsize=(9, max(3.5, 0.46 * len(d))))
+    ax.barh(_friendly(d.index), d["cohens_d"],
             color=[_GREEN if v >= 0 else _RED for v in d["cohens_d"]])
     ax.axvline(0, color="0.5", lw=0.8)
-    ax.set_xlabel("Cohen's d  (top decile minus bottom decile)")
+    ax.set_xlabel("Cohen's d  (green = strong-drift firms have more; red = less)")
     ax.set_title("What strong- vs weak-drift firms look like")
+    ax.tick_params(axis="y", labelsize=7.5)
     fig.tight_layout()
     return fig
 
@@ -215,6 +228,118 @@ def write_feature_importance_csv(table: pd.DataFrame, cfg: DriftMLConfig) -> str
     return path
 
 
+def write_feature_matrix(df: pd.DataFrame, cfg: DriftMLConfig) -> str:
+    """Export the full event x feature x label matrix to ``outputs/event_features.csv``.
+
+    Mirrors the cached parquet so the matrix is inspectable alongside the report
+    without needing a parquet reader.
+    """
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    path = os.path.join(cfg.output_dir, "event_features.csv")
+    (df if df is not None else pd.DataFrame()).to_csv(path, index=False)
+    return path
+
+
+def feature_summary(df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
+    """Per-feature coverage + summary stats (count, % present, mean/std/min/med/max).
+
+    Categorical / non-numeric features report coverage and the number of distinct
+    levels; numeric features additionally report distributional stats.
+    """
+    n = len(df) if df is not None else 0
+    rows = []
+    for c in feature_cols:
+        if df is None or c not in df.columns:
+            continue
+        s = df[c]
+        present = int(s.notna().sum())
+        rec = {
+            "feature": c,
+            "family": D.feature_family(c),
+            "meaning": D.feature_desc(c),
+            "n_present": present,
+            "pct_present": round(100.0 * present / n, 1) if n else np.nan,
+        }
+        if pd.api.types.is_numeric_dtype(s):
+            v = pd.to_numeric(s, errors="coerce").dropna()
+            if len(v):
+                rec.update({
+                    "mean": float(v.mean()), "std": float(v.std()),
+                    "min": float(v.min()), "median": float(v.median()),
+                    "max": float(v.max()), "n_levels": np.nan,
+                })
+        else:
+            rec.update({"mean": np.nan, "std": np.nan, "min": np.nan,
+                        "median": np.nan, "max": np.nan,
+                        "n_levels": int(s.nunique(dropna=True))})
+        rows.append(rec)
+    cols = ["feature", "family", "meaning", "n_present", "pct_present",
+            "mean", "std", "min", "median", "max", "n_levels"]
+    out = pd.DataFrame(rows, columns=cols)
+    return out.set_index("feature") if not out.empty else out
+
+
+def write_feature_summary(summary: pd.DataFrame, cfg: DriftMLConfig) -> str:
+    """Persist per-feature coverage/stats to ``outputs/feature_summary.csv``."""
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    path = os.path.join(cfg.output_dir, "feature_summary.csv")
+    (summary if summary is not None else pd.DataFrame()).to_csv(path, index=True)
+    return path
+
+
+def _wrapped_glossary_table(pairs: list[tuple[str, ...]], headers: list[str],
+                            col_widths: list[float], ss) -> Table:
+    """A table whose right-hand column wraps (Paragraphs), for glossary text."""
+    cell = ParagraphStyle("Cell", parent=ss["Normal"], fontSize=7.8, leading=10)
+    key = ParagraphStyle("Key", parent=cell, fontName="Helvetica-Bold",
+                         textColor=_NAVY)
+    data = [[Paragraph(f"<b>{h}</b>", cell) for h in headers]]
+    for row in pairs:
+        cells = [Paragraph(str(row[0]), key)]
+        cells += [Paragraph(str(x), cell) for x in row[1:]]
+        data.append(cells)
+    t = Table(data, colWidths=col_widths, repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), _NAVY),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, _LIGHT]),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#bbbbbb")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return t
+
+
+def _metric_glossary_flow(ss) -> list:
+    """Flowables: a 'how to read this report' metric glossary."""
+    rows = [(name, text) for name, text in D.METRICS.items()]
+    return [_wrapped_glossary_table(rows, ["Metric", "What it means"],
+                                    [1.7 * inch, 5.2 * inch], ss)]
+
+
+def _feature_glossary_flow(feature_cols: list[str], ss) -> list:
+    """Flowables: a feature -> family -> plain meaning table, grouped by family.
+
+    Only features actually present in the run are documented, so the glossary
+    matches the charts and driver map the reader is looking at.
+    """
+    present = [c for c in feature_cols if c in D.FEATURES]
+    # Group by family, preserving the catalog ordering of FEATURES.
+    order = list(D.FEATURES.keys())
+    present.sort(key=lambda c: order.index(c) if c in order else 999)
+    rows = []
+    for c in present:
+        meta = D.FEATURES[c]
+        rows.append((c, meta["family"], meta["desc"]))
+    if not rows:
+        return [Paragraph("No documented features in this run.", ss["Body"])]
+    return [_wrapped_glossary_table(
+        rows, ["Feature", "Family", "Plain-English meaning"],
+        [1.25 * inch, 1.25 * inch, 4.4 * inch], ss)]
+
+
 def _headline(results: dict) -> str:
     cons = results.get("consistency")
     if cons is None or cons.empty:
@@ -259,8 +384,41 @@ def build_pdf(cfg: DriftMLConfig, results: dict) -> str:
         "and permutation importances are aggregated across folds to score how "
         "<i>consistently</i> each feature drives the drift.", ss["Body"]))
     story.append(Paragraph(_headline(results), ss["Body"]))
+    story.append(Paragraph(
+        "<b>How to read this report.</b> Section A defines every metric used "
+        "below; Section B explains what each input feature means. Sections 1\u20135 "
+        "then present the results, each figure paired with a plain-language "
+        "\u201cwhat it shows / how to read it\u201d note.", ss["Body"]))
     story.append(Paragraph("<b>Reproduce:</b>", ss["Body"]))
     story.append(Paragraph(cfg.as_cli_command(), ss["Mono"]))
+    story.append(PageBreak())
+
+    # --- Section A: how to read this report (label + metric glossary) ------- #
+    story.append(Paragraph("A. How to read this report", ss["H2"]))
+    story.append(Paragraph(
+        f"<b>What is being predicted (\u201cthe drift\u201d).</b> {D.LABELS['drift_raw']}",
+        ss["Body"]))
+    story.append(Paragraph(
+        f"<b>Primary target.</b> {D.LABELS['drift_z']}", ss["Body"]))
+    story.append(Paragraph(
+        "Two complementary models map features to this drift: an interpretable "
+        "<b>Fama-MacBeth</b> linear regression (one cross-sectional fit per quarter, "
+        "coefficients averaged) and a non-linear <b>LightGBM</b> tree model explained "
+        "with <b>SHAP</b>. Both are validated with purged, embargoed walk-forward "
+        "cross-validation so a 60-day label never leaks into a neighbouring fold.",
+        ss["Body"]))
+    story.append(Spacer(1, 0.08 * inch))
+    story.append(Paragraph("Metric glossary", ss["Body"]))
+    story.extend(_metric_glossary_flow(ss))
+    story.append(PageBreak())
+
+    # --- Section B: feature glossary ---------------------------------------- #
+    story.append(Paragraph("B. Feature glossary \u2014 what each input means", ss["H2"]))
+    story.append(Paragraph(
+        "Every feature is point-in-time: knowable strictly before trading day +1, "
+        "so nothing leaks from the future. These are the inputs ranked in the SHAP "
+        "and consistency charts and the Fama-MacBeth table.", ss["Body"]))
+    story.extend(_feature_glossary_flow(results.get("feature_cols", []), ss))
     story.append(PageBreak())
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -275,39 +433,45 @@ def build_pdf(cfg: DriftMLConfig, results: dict) -> str:
             "Does the model rank drift correctly out of sample, and is there an economic "
             "spread between its top and bottom predictions?" + clf_txt, ss["Body"]))
         story.append(_fig_image(fig_oos_metrics(results, cfg), tmp, "oos"))
-        story.append(Paragraph(
-            "Figure 1. Spearman rank IC, OOS R\u00b2, and top\u2013bottom decile spread "
-            "per drift horizon.", ss["Caption"]))
+        story.append(Paragraph("Figure 1. " + D.PLOTS["oos"]["shows"], ss["Caption"]))
+        story.append(Paragraph("<b>How to read it.</b> " + D.PLOTS["oos"]["read"],
+                               ss["Body"]))
         story.append(PageBreak())
 
         story.append(Paragraph("2. Which features drive the drift", ss["H2"]))
-        story.append(Paragraph(
-            "Global SHAP importance with sign: green features push drift up, red push it "
-            "down. This is the non-linear analogue of the Fama-MacBeth coefficients.",
-            ss["Body"]))
+        story.append(Paragraph(D.PLOTS["shap"]["shows"], ss["Body"]))
         story.append(_fig_image(fig_shap_summary(results, cfg), tmp, "shap"))
         story.append(Paragraph("Figure 2. Signed global feature importance (SHAP).",
                                ss["Caption"]))
+        story.append(Paragraph("<b>How to read it.</b> " + D.PLOTS["shap"]["read"],
+                               ss["Body"]))
+        story.append(PageBreak())
+
+        story.append(Paragraph("2b. How consistent are those drivers?", ss["H2"]))
+        story.append(Paragraph(D.PLOTS["cons"]["shows"], ss["Body"]))
         story.append(_fig_image(fig_consistency(results, cfg), tmp, "cons"))
         story.append(Paragraph(
-            "Figure 3. Consistency score \u2014 how stably each feature ranks as a top "
-            "driver across walk-forward folds, blended with linear significance.",
-            ss["Caption"]))
+            "Figure 3. Consistency score across walk-forward folds.", ss["Caption"]))
+        story.append(Paragraph("<b>How to read it.</b> " + D.PLOTS["cons"]["read"],
+                               ss["Body"]))
         story.append(PageBreak())
 
         story.append(Paragraph("3. Strong vs weak drift firms", ss["H2"]))
-        story.append(Paragraph(
-            "Standardized difference (Cohen's d) in each feature between top-decile and "
-            "bottom-decile drift events.", ss["Body"]))
+        story.append(Paragraph(D.PLOTS["desc"]["shows"], ss["Body"]))
         story.append(_fig_image(fig_descriptive(results, cfg), tmp, "desc"))
         story.append(Paragraph("Figure 4. Top-minus-bottom decile effect sizes.",
                                ss["Caption"]))
+        story.append(Paragraph("<b>How to read it.</b> " + D.PLOTS["desc"]["read"],
+                               ss["Body"]))
         story.append(PageBreak())
 
         story.append(Paragraph("4. Headline driver map", ss["H2"]))
         story.append(Paragraph(
-            "Feature \u2192 direction \u2192 strength \u2192 consistency. <i>sign_agreement</i> "
-            "flags where the linear (Fama-MacBeth) and non-linear (SHAP) signs concur.",
+            "The summary table: each feature with its strength (<i>importance</i>), "
+            "<i>direction</i> (+ raises drift, \u2212 lowers it), cross-fold stability "
+            "(<i>top_k_hit_rate</i>), linear effect (<i>coef</i>, <i>t_stat</i>), whether "
+            "the linear and SHAP signs concur (<i>sign_agreement</i>), and the overall "
+            "<i>consistency_score</i> (0\u20131). See Section A for each term.",
             ss["Body"]))
         cons = results.get("consistency")
         if cons is not None and not cons.empty:
@@ -322,6 +486,22 @@ def build_pdf(cfg: DriftMLConfig, results: dict) -> str:
         fm = results.get("fm")
         if fm is not None and not fm.empty:
             story.append(_df_table(fm, ["coef", "t_stat", "n_quarters", "frac_positive"]))
+        else:
+            story.append(Paragraph("Not available.", ss["Body"]))
+
+        story.append(PageBreak())
+        story.append(Paragraph("6. Feature coverage & summary statistics", ss["H2"]))
+        story.append(Paragraph(
+            "How well-populated each feature is across the sample and its basic "
+            "distribution. Low <i>pct_present</i> (e.g. WRDS fundamentals that are "
+            "missing for some firm-quarters) means a feature is informative on fewer "
+            "events; the full matrix is exported to <i>outputs/event_features.csv</i> "
+            "and per-feature stats to <i>outputs/feature_summary.csv</i>.", ss["Body"]))
+        summ = results.get("feature_summary")
+        if summ is not None and not summ.empty:
+            story.append(_df_table(
+                summ, ["family", "n_present", "pct_present", "mean", "std",
+                       "median", "n_levels"], max_rows=50))
         else:
             story.append(Paragraph("Not available.", ss["Body"]))
 
