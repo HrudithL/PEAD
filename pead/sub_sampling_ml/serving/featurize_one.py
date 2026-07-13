@@ -21,6 +21,7 @@ import pandas as pd
 
 from ...equities import data_loader, surprise, event_study
 from .. import features as features_mod
+from .. import labels as labels_mod
 from ..config import DriftMLConfig
 from .artifact import DriftModel
 from . import wrds_incremental
@@ -278,3 +279,43 @@ def featurize_one(user: EventInputs, cfg: DriftMLConfig, *,
         used_cache=prefer_cache and cached is not None,
         cache_row=cached,
     )
+
+
+# ------------------------------------------------------------ realized outcome
+
+
+def realized_drift_one(ticker: str, anndate, cfg: DriftMLConfig,
+                       horizon: Optional[int] = None) -> Optional[float]:
+    """Realized CAR[+1, +horizon] for one event, or ``None`` if not observable.
+
+    Unlike :func:`featurize_one` (which locates against ``window_post=0`` so
+    a just-announced event can still be scored), this needs the *actual*
+    trailing price history -- it is used after the fact to check a
+    prediction against what happened, not to build inference features. Returns
+    ``None`` both when the ticker/date can't be located at all and when the
+    price panel doesn't yet reach ``horizon`` trading days past the
+    announcement (event hasn't finished playing out).
+    """
+    horizon = int(horizon or cfg.primary_horizon)
+    eq = cfg.to_equities_config()
+    ticker = str(ticker).upper()
+
+    cached = find_in_ibes_cache(ticker, str(anndate), cfg)
+    anntims = cached.get("anntims") if cached else None
+    events = pd.DataFrame({"oftic": [ticker], "anndats": [pd.Timestamp(anndate)],
+                          "anntims": [anntims]})
+    events = surprise.attach_anchor_date(events)
+
+    px = data_loader.load_prices(eq, {ticker})
+    if px.empty:
+        return None
+    rets, calendar, bench_ret, prices_wide = data_loader.build_return_panel(px, eq)
+
+    ev = event_study.locate_events(events, rets, calendar, eq)
+    if ev.empty:
+        return None
+
+    offsets, ar_mat = event_study.compute_ar_matrix(ev, rets, bench_ret, eq)
+    car = labels_mod.car_window(offsets, ar_mat, start=1, end=horizon)
+    val = float(car[0])
+    return val if np.isfinite(val) else None

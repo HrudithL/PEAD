@@ -28,6 +28,7 @@ htmlcov/
 *.swp
 .DS_Store
 Thumbs.db
+.hru/
 
 # ---- Environment / secrets ----
 .env
