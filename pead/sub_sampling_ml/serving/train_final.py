@@ -29,9 +29,11 @@ import pandas as pd
 from ..config import DriftMLConfig
 from ..dataset import build_event_features, feature_columns, load_event_features
 from ..features import CATEGORICAL_FEATURES
+from ..model import QUARTER_COL
 from ...ticker_groups import expand
 from .artifact import (DEFAULT_QUANTILES, DriftModel, FeatureSchema,
                        _quantile_name, make_metadata)
+from .tune import time_ordered_holdout
 
 
 # LightGBM hyperparameters -- mirror the research pipeline so the quantile
@@ -149,50 +151,138 @@ def _apply_schema(df: pd.DataFrame, schema: FeatureSchema) -> pd.DataFrame:
 
 
 def _fit_booster(X: pd.DataFrame, y: pd.Series, params: dict,
-                 cat_cols: list[str], num_boost_round: int):
+                 cat_cols: list[str], *, num_boost_round: int,
+                 X_val: Optional[pd.DataFrame] = None,
+                 y_val: Optional[pd.Series] = None,
+                 early_stopping_rounds: Optional[int] = None):
+    """Fit one LightGBM booster, optionally with an early-stopping val set.
+
+    ``X_val``/``y_val``, when given, are only used if they contain at least
+    one non-NaN label -- otherwise training falls back to the plain
+    fixed-round fit (no ``valid_sets``), same as when they're omitted.
+    """
     import lightgbm as lgb
 
     mask = y.notna()
     Xf, yf = X.loc[mask], y.loc[mask].astype(float).values
-    dset = lgb.Dataset(
+    dtrain = lgb.Dataset(
         Xf, label=yf,
         categorical_feature=cat_cols or "auto",
         free_raw_data=False,
     )
-    booster = lgb.train(params, dset, num_boost_round=num_boost_round)
+
+    valid_sets = None
+    callbacks = None
+    if X_val is not None and y_val is not None:
+        vmask = y_val.notna()
+        if vmask.sum() >= 1:
+            Xv, yv = X_val.loc[vmask], y_val.loc[vmask].astype(float).values
+            dval = lgb.Dataset(
+                Xv, label=yv, reference=dtrain,
+                categorical_feature=cat_cols or "auto",
+                free_raw_data=False,
+            )
+            valid_sets = [dval]
+            if early_stopping_rounds:
+                callbacks = [lgb.early_stopping(early_stopping_rounds, verbose=False),
+                            lgb.log_evaluation(0)]
+
+    booster = lgb.train(params, dtrain, num_boost_round=num_boost_round,
+                        valid_sets=valid_sets, callbacks=callbacks or None)
     return booster
+
+
+def _fit_head(X: pd.DataFrame, y: pd.Series, params: dict, cat_cols: list[str], *,
+             quarters, num_boost_round_cap: int = 2000,
+             early_stopping_rounds: int = 100, fallback_rounds: int = 400):
+    """Early-stop on a time-ordered holdout, then refit the winner on ALL rows.
+
+    ``quarters`` must be row-aligned with ``X``/``y`` (same row order) --
+    :func:`~pead.sub_sampling_ml.serving.tune.time_ordered_holdout` returns
+    positions relative to that order, valid for ``.iloc`` on ``X``/``y``.
+
+    The most-recent distinct quarter is carved off as a validation set purely
+    to pick a boosting-round count via early stopping; the SHIPPED booster is
+    then refit on the full ``X``/``y`` at that round count, so the deployed
+    model always trains on the most data available (doc S3.4 Job 3). When too
+    few distinct quarters exist for a holdout, early stopping is skipped
+    entirely and ``fallback_rounds`` fixed rounds are used instead.
+    """
+    fit_pos, val_pos = time_ordered_holdout(quarters, 1)
+    # No holdout quarter available, or the fit slice carries no labels at all
+    # (e.g. a head whose only non-NaN labels happen to fall in the held-out
+    # quarter) -> early stopping is impossible; fall back to a fixed-round fit
+    # on ALL rows rather than train the probe on an empty label set.
+    if val_pos.size == 0 or int(y.iloc[fit_pos].notna().sum()) == 0:
+        return _fit_booster(X, y, params, cat_cols, num_boost_round=fallback_rounds)
+
+    X_fit, y_fit = X.iloc[fit_pos], y.iloc[fit_pos]
+    X_val, y_val = X.iloc[val_pos], y.iloc[val_pos]
+
+    probe = _fit_booster(
+        X_fit, y_fit, params, cat_cols,
+        num_boost_round=num_boost_round_cap,
+        X_val=X_val, y_val=y_val,
+        early_stopping_rounds=early_stopping_rounds,
+    )
+    best_iteration = int(getattr(probe, "best_iteration", 0) or 0)
+    if best_iteration <= 0:
+        # No early stopping actually happened (e.g. the val slice was all-NaN)
+        # -- fall back to the fixed round count rather than trust best_iteration.
+        best_iteration = fallback_rounds
+    return _fit_booster(X, y, params, cat_cols, num_boost_round=best_iteration)
 
 
 def _fit_quantile_boosters(X: pd.DataFrame, y: pd.Series, cat_cols: list[str],
                            quantiles: tuple[float, ...],
-                           random_state: int) -> dict[str, object]:
+                           random_state: int, *,
+                           params: Optional[dict] = None,
+                           quarters=None) -> dict[str, object]:
+    base = params or _BASE_PARAMS
     boosters = {}
     for q in quantiles:
-        params = {**_BASE_PARAMS,
-                  "objective": "quantile",
-                  "alpha": float(q),
-                  "seed": int(random_state)}
-        boosters[_quantile_name(q)] = _fit_booster(
-            X, y, params, cat_cols, _NUM_BOOST_ROUND)
+        head_params = {**base,
+                       "objective": "quantile",
+                       "alpha": float(q),
+                       "seed": int(random_state)}
+        if quarters is not None:
+            boosters[_quantile_name(q)] = _fit_head(
+                X, y, head_params, cat_cols,
+                quarters=quarters, fallback_rounds=_NUM_BOOST_ROUND)
+        else:
+            boosters[_quantile_name(q)] = _fit_booster(
+                X, y, head_params, cat_cols, num_boost_round=_NUM_BOOST_ROUND)
     return boosters
 
 
 def _fit_z_booster(X: pd.DataFrame, y: pd.Series, cat_cols: list[str],
-                   random_state: int):
-    params = {**_BASE_PARAMS,
-              "objective": "regression",
-              "metric": "l2",
-              "seed": int(random_state)}
-    return _fit_booster(X, y, params, cat_cols, _NUM_BOOST_ROUND)
+                   random_state: int, *,
+                   params: Optional[dict] = None,
+                   quarters=None):
+    base = params or _BASE_PARAMS
+    head_params = {**base,
+                   "objective": "regression",
+                   "metric": "l2",
+                   "seed": int(random_state)}
+    if quarters is not None:
+        return _fit_head(X, y, head_params, cat_cols,
+                         quarters=quarters, fallback_rounds=_NUM_BOOST_ROUND)
+    return _fit_booster(X, y, head_params, cat_cols, num_boost_round=_NUM_BOOST_ROUND)
 
 
 def _fit_class_booster(X: pd.DataFrame, y: pd.Series, cat_cols: list[str],
-                       random_state: int):
-    params = {**_BASE_PARAMS,
-              "objective": "binary",
-              "metric": "binary_logloss",
-              "seed": int(random_state)}
-    return _fit_booster(X, y, params, cat_cols, _CLF_BOOST_ROUND)
+                       random_state: int, *,
+                       params: Optional[dict] = None,
+                       quarters=None):
+    base = params or _BASE_PARAMS
+    head_params = {**base,
+                   "objective": "binary",
+                   "metric": "binary_logloss",
+                   "seed": int(random_state)}
+    if quarters is not None:
+        return _fit_head(X, y, head_params, cat_cols,
+                         quarters=quarters, fallback_rounds=_CLF_BOOST_ROUND)
+    return _fit_booster(X, y, head_params, cat_cols, num_boost_round=_CLF_BOOST_ROUND)
 
 
 # ---------------------------------------------------------- history table
@@ -223,8 +313,20 @@ def train_final(cfg: DriftMLConfig, *,
                 cutoff_date: Optional[str] = None,
                 universe: str = "SP500",
                 out_root: str = "models",
-                oos_metrics: Optional[dict] = None) -> DriftModel:
-    """Fit and persist the frozen bundle. Returns the in-memory model."""
+                oos_metrics: Optional[dict] = None,
+                params: Optional[dict] = None) -> DriftModel:
+    """Fit and persist the frozen bundle. Returns the in-memory model.
+
+    ``params``, when given, is the shared tuned LightGBM parameter set (e.g.
+    :attr:`~pead.sub_sampling_ml.serving.tune.TuneResult.best_params`) used as
+    the base for every head instead of the legacy hardcoded
+    :data:`_BASE_PARAMS`; each head still layers its own
+    objective/alpha/metric/seed on top (see :func:`_fit_quantile_boosters` /
+    :func:`_fit_z_booster` / :func:`_fit_class_booster`). Every head is fit
+    with early stopping on a time-ordered holdout and then refit on the full
+    training window at the discovered round count (:func:`_fit_head`), so the
+    shipped model always trains on the most data available (doc S3.4 Job 3).
+    """
     if cutoff_date is None:
         cutoff_date = date.today().isoformat()
 
@@ -249,19 +351,23 @@ def train_final(cfg: DriftMLConfig, *,
     feature_cols = feature_columns(df)
     schema = _fit_schema(df, feature_cols)
     X = _apply_schema(df, schema)
+    quarters = df[QUARTER_COL] if QUARTER_COL in df.columns else None
 
     _log(f"Fitting quantile boosters at {DEFAULT_QUANTILES} on {raw_col} ...")
     quantile_boosters = _fit_quantile_boosters(
-        X, df[raw_col], schema.cat_cols, DEFAULT_QUANTILES, cfg.random_state)
+        X, df[raw_col], schema.cat_cols, DEFAULT_QUANTILES, cfg.random_state,
+        params=params, quarters=quarters)
 
     _log(f"Fitting z regressor on {z_col} ...")
-    z_booster = _fit_z_booster(X, df[z_col], schema.cat_cols, cfg.random_state)
+    z_booster = _fit_z_booster(X, df[z_col], schema.cat_cols, cfg.random_state,
+                               params=params, quarters=quarters)
 
     class_booster = None
     if cls_col in df.columns and df[cls_col].notna().sum() >= 100:
         _log(f"Fitting classifier on {cls_col} (n={int(df[cls_col].notna().sum())}) ...")
         class_booster = _fit_class_booster(
-            X, df[cls_col], schema.cat_cols, cfg.random_state)
+            X, df[cls_col], schema.cat_cols, cfg.random_state,
+            params=params, quarters=quarters)
     else:
         _log(f"Skipping classifier (need >=100 non-NaN in {cls_col}).")
 
