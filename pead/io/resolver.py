@@ -59,6 +59,18 @@ def constituent_csv(filename: str) -> Path:
     return data_source_dir() / filename
 
 
+def wrds_cache_dir() -> Path:
+    """Directory for cached WRDS pulls (CRSP/Compustat CSVs).
+
+    Lives under the external Data Source dir (``BEI_DATA_DIR``/``WRDS_CACHE_DIR``)
+    so heavy WRDS extracts are pulled once and re-read locally instead of being
+    re-queried from the API on every run. Never committed (outside the repo).
+    """
+    env = os.environ.get("WRDS_CACHE_DIR")
+    base = Path(env) if env else (data_source_dir() / "wrds_cache")
+    return base
+
+
 # --------------------------------------------------------------------------- #
 # OptionMetrics parquet (year-partitioned)
 # --------------------------------------------------------------------------- #

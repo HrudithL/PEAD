@@ -23,7 +23,7 @@ def load_events(cfg: Config) -> pd.DataFrame:
     """Return one row per quarterly EPS announcement with the last pre-announcement consensus.
 
     Columns out: oftic, cname, anndats, anntims, fpedats, statpers, actual,
-    meanest, medest, stdev, numest.
+    meanest, medest, stdev, numest, numup, numdown.
     """
     df = pd.read_csv(
         cfg.ibes_path,
@@ -38,7 +38,7 @@ def load_events(cfg: Config) -> pd.DataFrame:
     for col in ("STATPERS", "FPEDATS", "ANNDATS_ACT"):
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
-    for col in ("ACTUAL", "MEANEST", "MEDEST", "STDEV", "NUMEST"):
+    for col in ("ACTUAL", "MEANEST", "MEDEST", "STDEV", "NUMEST", "NUMUP", "NUMDOWN"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # Need a real announcement date and a real actual to be an "event".
@@ -63,10 +63,11 @@ def load_events(cfg: Config) -> pd.DataFrame:
         "OFTIC": "oftic", "CNAME": "cname", "STATPERS": "statpers",
         "FPEDATS": "fpedats", "ACTUAL": "actual", "MEANEST": "meanest",
         "MEDEST": "medest", "STDEV": "stdev", "NUMEST": "numest",
+        "NUMUP": "numup", "NUMDOWN": "numdown",
         "ANNDATS_ACT": "anndats", "ANNTIMS_ACT": "anntims",
     })[[
         "oftic", "cname", "statpers", "fpedats", "anndats", "anntims",
-        "actual", "meanest", "medest", "stdev", "numest",
+        "actual", "meanest", "medest", "stdev", "numest", "numup", "numdown",
     ]]
 
     out["oftic"] = out["oftic"].str.upper()
