@@ -293,3 +293,149 @@ def test_extract_compustat_fundq_skips_cached_gvkeys_and_appends_per_chunk(tmp_p
     newly_queried = _queried_ids(fake.queries[-2]) + _queried_ids(fake.queries[-1])
     assert sorted(newly_queried) == ["2000", "3000"]
     assert sorted(second["gvkey"].astype(str).unique().tolist()) == ["1000", "2000", "3000"]
+
+
+# ---------------------------------------------------------------------------
+# Codex review follow-ups on PR #15:
+#   (1) gvkey zero-padding must survive a CSV cache round-trip.
+#   (2) a failed/quota-limited cache write must not drop pulled rows from the
+#       return value (the extractors must not depend on reading their own
+#       write back from disk within the same run).
+#   (3) the fundq cache's ``emp`` column must stay uniform across appends.
+# ---------------------------------------------------------------------------
+
+def _seed_fundq_row(cfg, gvkey: str) -> None:
+    """Append one full ``compustat_fundq`` row (incl. ``emp``) for ``gvkey``."""
+    we._append_cache(
+        pd.DataFrame(
+            {
+                "gvkey": [gvkey],
+                "datadate": ["2020-03-31"],
+                "rdq": ["2020-04-20"],
+                "fqtr": [1],
+                "fyearq": [2020],
+                "atq": [100.0],
+                "ceqq": [50.0],
+                "niq": [5.0],
+                "revtq": [40.0],
+                "cogsq": [20.0],
+                "saleq": [40.0],
+                "dlttq": [10.0],
+                "dlcq": [1.0],
+                "xrdq": [2.0],
+                "actq": [30.0],
+                "lctq": [15.0],
+                "cheq": [8.0],
+                "txpq": [1.0],
+                "dpq": [3.0],
+                "emp": [1.5],
+            }
+        ),
+        "compustat_fundq",
+        cfg,
+    )
+
+def test_norm_gvkey_canonicalizes_int_float_and_padded_forms():
+    assert we._norm_gvkey("001690") == "001690"
+    assert we._norm_gvkey("1690") == "001690"
+    assert we._norm_gvkey(1690) == "001690"
+    assert we._norm_gvkey(1690.0) == "001690"
+
+def test_extract_company_gvkey_padding_survives_cache_round_trip(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    we._append_cache(
+        pd.DataFrame({"gvkey": ["001690"], "gsector": ["45"], "sic": ["7372"]}),
+        "compustat_company",
+        cfg,
+    )
+    # A pandas round-trip through CSV coerces an all-numeric gvkey column to
+    # int64, dropping the zero-padding -- confirm that actually happened so
+    # this test is exercising the real bug, not a no-op.
+    on_disk = we._read_cache("compustat_company", cfg)
+    assert str(on_disk["gvkey"].iloc[0]) != "001690"
+
+    def _boom(_cfg):
+        raise AssertionError("get_connection must not be called: padded gvkey should hit cache")
+
+    monkeypatch.setattr(we, "get_connection", _boom)
+
+    padded = we.extract_company(["001690"], cfg)
+    assert not padded.empty
+    assert padded["gvkey"].map(we._norm_gvkey).tolist() == ["001690"]
+
+    unpadded = we.extract_company(["1690"], cfg)
+    assert not unpadded.empty
+    assert unpadded["gvkey"].map(we._norm_gvkey).tolist() == ["001690"]
+
+def test_extract_compustat_fundq_gvkey_padding_survives_cache_round_trip(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    _seed_fundq_row(cfg, "001690")
+    on_disk = we._read_cache("compustat_fundq", cfg)
+    assert str(on_disk["gvkey"].iloc[0]) != "001690"
+
+    def _boom(_cfg):
+        raise AssertionError("get_connection must not be called: padded gvkey should hit cache")
+
+    monkeypatch.setattr(we, "get_connection", _boom)
+
+    padded = we.extract_compustat_fundq(["001690"], cfg)
+    assert not padded.empty
+    assert padded["gvkey"].map(we._norm_gvkey).tolist() == ["001690"]
+
+    unpadded = we.extract_compustat_fundq(["1690"], cfg)
+    assert not unpadded.empty
+    assert unpadded["gvkey"].map(we._norm_gvkey).tolist() == ["001690"]
+
+def test_extract_crsp_daily_returns_pulled_rows_when_cache_write_fails(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    fake = _FakeConn()
+    monkeypatch.setattr(we, "get_connection", lambda _cfg: fake)
+    # Simulate every cache write failing (e.g. a quota-limited Drive mount);
+    # _append_cache is best-effort in production, so make it a true no-op.
+    monkeypatch.setattr(we, "_append_cache", lambda *a, **k: None)
+
+    out = we.extract_crsp_daily([10001, 10002], cfg)
+
+    assert sorted(out["permno"].unique().tolist()) == [10001, 10002]
+    assert not we.cache_path("crsp_daily", cfg).is_file()
+
+def test_extract_compustat_fundq_returns_pulled_rows_when_cache_write_fails(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    fake = _FakeConn()
+    monkeypatch.setattr(we, "get_connection", lambda _cfg: fake)
+    monkeypatch.setattr(we, "_append_cache", lambda *a, **k: None)
+
+    out = we.extract_compustat_fundq(["1000", "2000"], cfg)
+
+    assert sorted(out["gvkey"].astype(str).unique().tolist()) == ["1000", "2000"]
+    assert "emp" in out.columns
+    assert not we.cache_path("compustat_fundq", cfg).is_file()
+
+def test_extract_compustat_fundq_reindexes_emp_uniformly_across_chunks(tmp_path, monkeypatch):
+    """A chunk pulled via the emp fallback still lands with an emp column (NaN)."""
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(we, "_GVKEY_CHUNK", 1)
+
+    class _NoEmpConn(_FakeConn):
+        def raw_sql(self, sql: str) -> pd.DataFrame:
+            if "comp.fundq" in sql and sql.split(" from comp.fundq")[0].strip().endswith("emp"):
+                raise RuntimeError("emp column not available on this fundq vintage")
+            return super().raw_sql(sql)
+
+    fake = _NoEmpConn()
+    monkeypatch.setattr(we, "get_connection", lambda _cfg: fake)
+
+    first = we.extract_compustat_fundq(["1000"], cfg)
+    assert "emp" in first.columns
+    assert pd.isna(first["emp"].iloc[0])
+
+    on_disk = pd.read_csv(we.cache_path("compustat_fundq", cfg))
+    assert "emp" in on_disk.columns
+
+    # A second, emp-bearing chunk appended afterwards must not make the CSV
+    # ragged: both rows should read back cleanly with a uniform column set.
+    fake2 = _FakeConn()
+    monkeypatch.setattr(we, "get_connection", lambda _cfg: fake2)
+    second = we.extract_compustat_fundq(["1000", "2000"], cfg)
+    assert sorted(second["gvkey"].astype(str).unique().tolist()) == ["1000", "2000"]
+    assert "emp" in second.columns
