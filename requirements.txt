@@ -16,3 +16,4 @@ lightgbm>=4.0
 shap>=0.44
 wrds>=3.1
 python-dotenv>=1.0
+optuna>=3.6
