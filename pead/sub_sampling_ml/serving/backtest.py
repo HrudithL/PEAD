@@ -211,11 +211,15 @@ def _reliability_table(results: pd.DataFrame, n: int = 10) -> pd.DataFrame:
     """
     if "prob_up" not in results.columns:
         return pd.DataFrame(columns=["bin", "pred_prob", "empirical_prob", "n"])
-    y = (pd.to_numeric(results["drift_raw"], errors="coerce") > 0).astype(float)
+    # Drop events with a missing realized label BEFORE deriving the up/down
+    # outcome: NaN > 0 is False, which would otherwise silently count a missing
+    # outcome as "down" and bias the reliability curve.
+    raw = pd.to_numeric(results["drift_raw"], errors="coerce")
     p = pd.to_numeric(results["prob_up"], errors="coerce")
-    df = pd.DataFrame({"y": y, "p": p}).dropna()
+    df = pd.DataFrame({"raw": raw, "p": p}).dropna()
     if df.empty:
         return pd.DataFrame(columns=["bin", "pred_prob", "empirical_prob", "n"])
+    df["y"] = (df["raw"] > 0).astype(float)
 
     bins = max(1, min(n, len(df)))
     if bins == 1:
@@ -453,6 +457,12 @@ def run_backtest(cfg: DriftMLConfig, *, universe: str = "SP500",
     :func:`run_walk_forward`; ``tune_result`` is threaded into
     :func:`write_model_card`'s hyperparameter-search summary panel.
     """
+    # If a caller passes tune_result (to populate the model-card hyperparameter
+    # panel) but not params, score with the tuned params too -- otherwise the
+    # PDF would advertise the tuned hyperparameters while the backtest silently
+    # used the hardcoded defaults.
+    if params is None and tune_result is not None:
+        params = getattr(tune_result, "best_params", None)
     results = run_walk_forward(cfg, universe=universe, out_dir=out_dir,
                                params=params, test_quarters=test_quarters)
     summary = summarize(results)

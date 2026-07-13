@@ -289,3 +289,33 @@ def test_run_walk_forward_test_quarters_no_match_raises(monkeypatch, tmp_path):
         backtest.run_walk_forward(
             cfg, universe="all", out_dir=tmp_path / "none_match",
             test_quarters=["2099Q1"])
+
+
+def test_reliability_table_drops_missing_outcomes():
+    """Events with a missing realized label are dropped BEFORE deriving up/down
+    -- NaN>0 would otherwise silently count a missing outcome as 'down'."""
+    res = pd.DataFrame({
+        "drift_raw": [0.01, -0.02, np.nan, 0.03, np.nan],
+        "prob_up": [0.6, 0.4, 0.9, 0.7, 0.1],
+    })
+    tbl = backtest._reliability_table(res, n=2)
+    assert int(tbl["n"].sum()) == 3  # only the 3 finite-drift rows contribute
+
+
+def test_run_backtest_derives_params_from_tune_result(tmp_path, monkeypatch):
+    """Passing tune_result but not params must still score with the tuned params
+    so the model card and the fitted folds agree."""
+    captured: dict = {}
+
+    def _fake_wf(cfg, *, universe, out_dir, params=None, test_quarters=None):
+        captured["params"] = params
+        return pd.DataFrame({"drift_raw": [0.0], "pred_q50": [0.0]})
+
+    monkeypatch.setattr(backtest, "run_walk_forward", _fake_wf)
+    monkeypatch.setattr(backtest, "summarize", lambda results: {})
+    monkeypatch.setattr(backtest, "write_model_card", lambda *a, **k: tmp_path / "x.pdf")
+    tr = types.SimpleNamespace(best_params={"num_leaves": 7}, best_value=0.1,
+                               baseline_value=0.2, n_trials=3)
+    backtest.run_backtest(_cfg(), universe="all", out_dir=tmp_path,
+                          params=None, tune_result=tr)
+    assert captured["params"] == {"num_leaves": 7}
