@@ -253,3 +253,58 @@ def test_artifact_version_tag_and_manifest(tmp_path):
     assert reloaded.metadata.cutoff_date == "2024-06-30"
     assert reloaded.metadata.horizon == 60
     assert "q50" in reloaded.quantile_boosters
+
+
+# ---------------------------------------------------------- tuned params + early stopping
+
+
+_TUNED_PARAMS = {
+    "num_leaves": 15,
+    "learning_rate": 0.1,
+    "min_data_in_leaf": 5,
+    "feature_fraction": 0.9,
+    "bagging_fraction": 0.9,
+    "bagging_freq": 1,
+    "verbose": -1,
+}
+
+
+def test_fit_quantile_boosters_with_tuned_params_and_early_stopping():
+    """``params=``/``quarters=`` routes through `_fit_head`: early-stop on the
+    most recent quarter, then refit on everything -- still yields usable
+    boosters."""
+    df = _synthetic_features(n=400)
+    feature_cols = ["sue_std", "ear", "mom_1m", "gics_sector", "ff12"]
+    schema = train_final._fit_schema(df, feature_cols)
+    X = train_final._apply_schema(df, schema)
+
+    boosters = train_final._fit_quantile_boosters(
+        X, df["drift_raw_h60"], schema.cat_cols, artifact_mod.DEFAULT_QUANTILES,
+        0, params=_TUNED_PARAMS, quarters=df["cal_q"])
+
+    assert set(boosters.keys()) == {"q10", "q25", "q50", "q75", "q90"}
+    for booster in boosters.values():
+        preds = booster.predict(X)
+        assert len(preds) == len(X)
+        assert np.isfinite(preds).all()
+
+
+def test_train_final_end_to_end_with_tuned_params(tmp_path, monkeypatch):
+    """``train_final(params=...)`` end to end: cutoff/universe filtering,
+    schema fit, all three heads via the tuned + early-stop path, and a saved
+    bundle on disk."""
+    cfg = _cfg()
+    synthetic = _synthetic_features(n=400)
+    monkeypatch.setattr(train_final, "_load_or_build", lambda cfg: synthetic)
+
+    model = train_final.train_final(
+        cfg, cutoff_date="2100-01-01", universe="all",
+        out_root=str(tmp_path), params=_TUNED_PARAMS)
+
+    assert isinstance(model, DriftModel)
+
+    bundle_dirs = [p for p in tmp_path.iterdir() if p.is_dir()]
+    assert len(bundle_dirs) == 1
+    bundle_dir = bundle_dirs[0]
+    assert (bundle_dir / "manifest.json").is_file()
+    assert (bundle_dir / "booster_q50.txt").is_file()
