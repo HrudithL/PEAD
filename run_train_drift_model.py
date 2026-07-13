@@ -90,6 +90,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         df[QUARTER_COL], args.test_frac)
 
     tag_dir = Path(args.out) / f"{args.cutoff}_pending"
+    # Clear leftovers from an interrupted earlier run so stale model_card.pdf /
+    # backtest_results.csv / best_params.json can't be moved into this run's
+    # final bundle.
+    if tag_dir.exists():
+        shutil.rmtree(tag_dir, ignore_errors=True)
     tag_dir.mkdir(parents=True, exist_ok=True)
 
     best_params = None

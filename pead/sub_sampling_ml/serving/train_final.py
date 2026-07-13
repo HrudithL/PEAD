@@ -106,6 +106,20 @@ def _numeric_and_cat(df: pd.DataFrame,
     return nums, cats
 
 
+def _json_safe_level(v):
+    """Keep a categorical level JSON-serialisable WITHOUT stringifying numeric
+    ones. NumPy int/float scalars must survive as numbers so ``_apply_schema``'s
+    ``pd.Categorical`` matches the numeric raw column instead of coercing the
+    whole feature to NaN (e.g. ``fiscal_q`` / ``beat_flag`` / ``idx_member``)."""
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, (float, np.floating)):
+        return float(v)
+    return str(v)
+
+
 def _fit_schema(df: pd.DataFrame, feature_cols: list[str]) -> FeatureSchema:
     num_cols, cat_cols = _numeric_and_cat(df, feature_cols)
     mean = {c: float(df[c].mean(skipna=True)) if df[c].notna().any() else 0.0
@@ -122,8 +136,7 @@ def _fit_schema(df: pd.DataFrame, feature_cols: list[str]) -> FeatureSchema:
             levels = list(col.cat.categories)
         else:
             levels = sorted(v for v in col.dropna().unique().tolist())
-        category_levels[c] = [str(v) if not isinstance(v, (int, float)) else v
-                              for v in levels]
+        category_levels[c] = [_json_safe_level(v) for v in levels]
     return FeatureSchema(
         feature_cols=list(feature_cols),
         cat_cols=cat_cols,

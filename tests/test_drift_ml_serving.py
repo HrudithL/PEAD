@@ -323,3 +323,19 @@ def test_fit_head_falls_back_when_fit_slice_has_no_labels():
                                     fallback_rounds=20)
     preds = booster.predict(X)
     assert len(preds) == 60 and np.isfinite(preds).all()
+
+
+def test_numeric_categorical_levels_survive_schema_round_trip():
+    """A categorical-dtype numeric column (e.g. fiscal_q) must keep NUMERIC
+    levels through the schema. Stringifying them made _apply_schema build a
+    pd.Categorical whose string levels matched none of the numeric values,
+    silently coercing the whole feature to NaN in training and inference."""
+    df = _synthetic_features(n=200)
+    df["fiscal_q"] = pd.Categorical((np.arange(len(df)) % 4) + 1)
+    schema = train_final._fit_schema(df, ["sue_std", "fiscal_q"])
+    assert "fiscal_q" in schema.cat_cols
+    assert schema.category_levels["fiscal_q"] == [1, 2, 3, 4]
+    assert all(isinstance(v, int) and not isinstance(v, bool)
+               for v in schema.category_levels["fiscal_q"])
+    X = train_final._apply_schema(df, schema)
+    assert X["fiscal_q"].notna().all()  # every value maps to a level, none lost

@@ -120,6 +120,11 @@ class DriftModel:
 
         if not self.industry_history.empty:
             self.industry_history.to_csv(out / _INDUSTRY_HISTORY, index=False)
+        else:
+            # Bundle dirs are reused for the same (cutoff_date, git_sha); drop any
+            # stale history from a prior save so load() can't resurrect industry
+            # features this model does not actually carry.
+            (out / _INDUSTRY_HISTORY).unlink(missing_ok=True)
 
         manifest = {
             "schema": asdict(self.schema),
