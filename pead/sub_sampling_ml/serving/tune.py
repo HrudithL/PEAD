@@ -169,16 +169,21 @@ def _evaluate_params(params: dict, df: pd.DataFrame,
         if len(X_fit) < 20 or len(X_test) == 0:
             continue
 
+        # cat_cols is the caller's full categorical list, which may be wider
+        # than feature_cols; X_fit only has feature_cols (via _apply_schema),
+        # so a name lgb.Dataset doesn't recognize would blow up construction.
+        cats = [c for c in cat_cols if c in X_fit.columns]
+
         q_losses = []
         for q in DEFAULT_QUANTILES:
             p = {**params, "objective": "quantile", "alpha": float(q),
                 "seed": int(cfg.random_state)}
             dtrain = lgb.Dataset(X_fit, label=y_fit,
-                                 categorical_feature=cat_cols or "auto",
+                                 categorical_feature=cats or "auto",
                                  free_raw_data=False)
             if X_val is not None:
                 dval = lgb.Dataset(X_val, label=y_val, reference=dtrain,
-                                   categorical_feature=cat_cols or "auto",
+                                   categorical_feature=cats or "auto",
                                    free_raw_data=False)
                 booster = lgb.train(
                     p, dtrain, num_boost_round=2000, valid_sets=[dval],
@@ -239,6 +244,21 @@ def tune_hyperparameters(df: pd.DataFrame, feature_cols: list[str],
             "min_train_quarters / embargo_months against the number of "
             "distinct quarters passed in.")
 
+    # Score OLD_BASE_PARAMS up front, under the identical protocol every trial
+    # uses. Splits existing (above) doesn't guarantee any fold survives
+    # _evaluate_params's own per-fold row-count guards -- if the tuning pool
+    # is thin, every fold can be skipped there and _evaluate_params returns
+    # NaN. Catch that here with a clear message instead of letting Optuna
+    # fail later at study.best_params with an opaque error, and reuse this
+    # same value for the returned TuneResult instead of recomputing it.
+    baseline_value = _evaluate_params(OLD_BASE_PARAMS, df, splits, feature_cols,
+                                      cat_cols, cfg)
+    if not np.isfinite(baseline_value):
+        raise ValueError(
+            "No valid walk-forward folds on the tuning pool -- every fold's "
+            "train/test split was rejected (folds too small, or labels "
+            "all-NaN). Widen the tuning pool or lower min_train_quarters.")
+
     sampler = optuna.samplers.TPESampler(seed=cfg.random_state)
     storage = f"sqlite:///{study_path}" if study_path else None
     study = optuna.create_study(direction="minimize", sampler=sampler,
@@ -273,10 +293,13 @@ def tune_hyperparameters(df: pd.DataFrame, feature_cols: list[str],
 
         callbacks = [_snapshot]
 
-    study.optimize(objective, n_trials=n_trials, timeout=timeout, callbacks=callbacks)
+    # With load_if_exists=True, a resumed study already carries trials from a
+    # prior run; Optuna's n_trials is NEW trials, not a total. Treat n_trials
+    # as the TOTAL budget across resumes: only run however many are left.
+    n_new = max(0, n_trials - len(study.trials))
+    if n_new > 0:
+        study.optimize(objective, n_trials=n_new, timeout=timeout, callbacks=callbacks)
 
-    baseline_value = _evaluate_params(OLD_BASE_PARAMS, df, splits, feature_cols,
-                                      cat_cols, cfg)
     best_params = {**study.best_params, "bagging_freq": 1, "verbose": -1}
 
     return TuneResult(

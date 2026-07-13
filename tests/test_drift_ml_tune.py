@@ -15,7 +15,7 @@ import pandas as pd
 import pytest
 
 from pead.sub_sampling_ml.config import DriftMLConfig
-from pead.sub_sampling_ml.model import QUARTER_COL
+from pead.sub_sampling_ml.model import QUARTER_COL, purged_walk_forward_splits
 from pead.sub_sampling_ml.serving import tune as tune_mod
 from pead.sub_sampling_ml.serving.tune import TuneResult
 
@@ -133,7 +133,69 @@ def test_time_ordered_holdout_too_few_quarters_returns_all_as_fit():
     assert fit_idx.tolist() == list(range(10))
 
 
+# ---------------------------------------------------------- _evaluate_params
+
+
+def test_evaluate_params_ignores_cat_cols_outside_feature_cols(tuning_pool_df):
+    """cat_cols may legitimately be wider than feature_cols (e.g. a caller's
+    full categorical roster vs. the subset actually being tuned). X_fit only
+    ever has feature_cols' columns (via _apply_schema), so passing the raw,
+    unfiltered cat_cols straight into lgb.Dataset(categorical_feature=...)
+    would raise once a name is absent from the frame. _evaluate_params must
+    intersect against the frame it actually built and still score fine."""
+    cfg = _tuning_pool_cfg()
+    splits = purged_walk_forward_splits(tuning_pool_df[QUARTER_COL], cfg.primary_horizon, cfg)
+    wide_cat_cols = [*_CAT_COLS, "not_a_tuned_feature"]
+
+    score = tune_mod._evaluate_params(
+        tune_mod.OLD_BASE_PARAMS, tuning_pool_df, splits, _FEATURE_COLS, wide_cat_cols, cfg)
+
+    assert np.isfinite(score)
+
+
 # ---------------------------------------------------------- tune_hyperparameters
+
+
+def test_tune_hyperparameters_raises_clear_error_when_every_fold_is_too_thin():
+    """purged_walk_forward_splits can hand back a non-empty split list (its
+    own quarter-count guard is satisfied) while every fold is still too thin
+    to survive _evaluate_params's own row-count guards -- e.g. a sparse
+    tuning pool. Previously this meant baseline_value/every trial's value was
+    silently NaN, so Optuna would only fail later at study.best_params with
+    an opaque error. Must instead fail fast with a clear ValueError, before
+    study.optimize is ever called."""
+    thin_df = _synthetic_tune_frame(n_per_q=5, seed=1)
+    tuning_quarters, _ = tune_mod.split_tuning_test(thin_df[QUARTER_COL], test_frac=0.25)
+    thin_pool = thin_df[thin_df[QUARTER_COL].isin(tuning_quarters)].reset_index(drop=True)
+    cfg = _tuning_pool_cfg(min_train_quarters=6)
+
+    # Sanity check: splits DO exist (the pre-existing "no splits" guard is
+    # not what's under test here) -- each one is just too small.
+    splits = purged_walk_forward_splits(thin_pool[QUARTER_COL], cfg.primary_horizon, cfg)
+    assert len(splits) >= 1
+    assert all(len(tr_idx) < 50 for tr_idx, _ in splits)
+
+    with pytest.raises(ValueError, match="walk-forward"):
+        tune_mod.tune_hyperparameters(
+            thin_pool, _FEATURE_COLS, _CAT_COLS, cfg, n_trials=2, study_path=None)
+
+
+def test_tune_hyperparameters_resume_caps_to_total_trial_budget(tmp_path, tuning_pool_df):
+    """n_trials is the TOTAL trial budget across resumes of a study_path-backed
+    study (load_if_exists=True), not additional trials stacked on top of
+    whatever the resumed study already has."""
+    cfg = _tuning_pool_cfg()
+    study_path = str(tmp_path / "resume_study.db")
+
+    first = tune_mod.tune_hyperparameters(
+        tuning_pool_df, _FEATURE_COLS, _CAT_COLS, cfg,
+        n_trials=3, study_path=study_path)
+    assert first.n_trials == 3
+
+    second = tune_mod.tune_hyperparameters(
+        tuning_pool_df, _FEATURE_COLS, _CAT_COLS, cfg,
+        n_trials=5, study_path=study_path)
+    assert second.n_trials == 5
 
 
 def test_tune_hyperparameters_returns_valid_result(tune_result):
