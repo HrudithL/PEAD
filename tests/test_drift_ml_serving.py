@@ -308,3 +308,18 @@ def test_train_final_end_to_end_with_tuned_params(tmp_path, monkeypatch):
     bundle_dir = bundle_dirs[0]
     assert (bundle_dir / "manifest.json").is_file()
     assert (bundle_dir / "booster_q50.txt").is_file()
+
+
+def test_fit_head_falls_back_when_fit_slice_has_no_labels():
+    """_fit_head must not crash when every non-NaN label happens to fall in the
+    held-out early-stopping quarter (so the fit slice is all-NaN) -- it falls
+    back to a fixed-round fit on all rows instead of probing on empty labels."""
+    rng = np.random.default_rng(0)
+    quarters = pd.Series(["2020Q1"] * 30 + ["2020Q2"] * 30)
+    X = pd.DataFrame({"f": np.linspace(-1.0, 1.0, 60)})
+    y = pd.Series([np.nan] * 30 + list(rng.normal(size=30)))
+    params = {"objective": "regression", "verbose": -1}
+    booster = train_final._fit_head(X, y, params, [], quarters=quarters,
+                                    fallback_rounds=20)
+    preds = booster.predict(X)
+    assert len(preds) == 60 and np.isfinite(preds).all()

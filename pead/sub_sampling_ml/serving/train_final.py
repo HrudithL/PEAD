@@ -209,7 +209,11 @@ def _fit_head(X: pd.DataFrame, y: pd.Series, params: dict, cat_cols: list[str], 
     entirely and ``fallback_rounds`` fixed rounds are used instead.
     """
     fit_pos, val_pos = time_ordered_holdout(quarters, 1)
-    if val_pos.size == 0:
+    # No holdout quarter available, or the fit slice carries no labels at all
+    # (e.g. a head whose only non-NaN labels happen to fall in the held-out
+    # quarter) -> early stopping is impossible; fall back to a fixed-round fit
+    # on ALL rows rather than train the probe on an empty label set.
+    if val_pos.size == 0 or int(y.iloc[fit_pos].notna().sum()) == 0:
         return _fit_booster(X, y, params, cat_cols, num_boost_round=fallback_rounds)
 
     X_fit, y_fit = X.iloc[fit_pos], y.iloc[fit_pos]
