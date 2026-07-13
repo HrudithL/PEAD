@@ -6,7 +6,13 @@ quarters, respecting the same purged/embargoed splits as the research pipeline
 (:func:`pead.sub_sampling_ml.model.purged_walk_forward_splits`), and predict
 raw drift on the test quarter. Nothing about the fit peeks at the test window,
 so the calibration and coverage numbers are the ones a live deployment would
-actually see.
+actually see. Each fold can optionally fit with the tuned hyperparameters and
+early stopping (``params=``, mirroring
+:func:`~pead.sub_sampling_ml.serving.train_final.train_final`) instead of the
+legacy fixed-round defaults, and the walk-forward can be restricted to a
+specific set of TEST quarters (``test_quarters=``) -- e.g. the held-out test
+set from :func:`~pead.sub_sampling_ml.serving.tune.split_tuning_test` (doc
+S3.4 Job 2).
 
 Emits two artifacts next to the model bundle:
 
@@ -41,7 +47,19 @@ def _load_or_build(cfg: DriftMLConfig) -> pd.DataFrame:
 
 
 def _predict_fold(train: pd.DataFrame, test: pd.DataFrame,
-                  horizon: int, cfg: DriftMLConfig) -> pd.DataFrame:
+                  horizon: int, cfg: DriftMLConfig,
+                  params: Optional[dict] = None) -> pd.DataFrame:
+    """Fit one walk-forward fold and score its test quarter.
+
+    ``params``, when given, is the shared tuned LightGBM parameter set (doc
+    S3.2/S3.4). Passing ``quarters=train[QUARTER_COL]`` unconditionally (same
+    as :func:`~pead.sub_sampling_ml.serving.train_final.train_final`) routes
+    every head through :func:`~pead.sub_sampling_ml.serving.train_final._fit_head`:
+    it early-stops on this fold's own most-recent TRAINING quarter (never the
+    test quarter) and then refits on the fold's full training window at the
+    discovered round count, so the backtest mirrors the discipline used for
+    the final shipped bundle.
+    """
     feature_cols = feature_columns(train)
     schema = _fit_schema(train, feature_cols)
     X_tr = _apply_schema(train, schema)
@@ -50,14 +68,18 @@ def _predict_fold(train: pd.DataFrame, test: pd.DataFrame,
     raw_col = f"drift_raw_h{horizon}"
     z_col = f"drift_z_h{horizon}"
     cls_col = f"drift_class_h{horizon}"
+    quarters = train[QUARTER_COL]
 
     q_boosters = _fit_quantile_boosters(
-        X_tr, train[raw_col], schema.cat_cols, DEFAULT_QUANTILES, cfg.random_state)
-    z_booster = _fit_z_booster(X_tr, train[z_col], schema.cat_cols, cfg.random_state)
+        X_tr, train[raw_col], schema.cat_cols, DEFAULT_QUANTILES, cfg.random_state,
+        params=params, quarters=quarters)
+    z_booster = _fit_z_booster(X_tr, train[z_col], schema.cat_cols, cfg.random_state,
+                               params=params, quarters=quarters)
     class_booster = None
     if cls_col in train.columns and train[cls_col].notna().sum() >= 100:
         class_booster = _fit_class_booster(
-            X_tr, train[cls_col], schema.cat_cols, cfg.random_state)
+            X_tr, train[cls_col], schema.cat_cols, cfg.random_state,
+            params=params, quarters=quarters)
 
     out = test[["oftic", "anndats", QUARTER_COL, raw_col]].copy()
     out = out.rename(columns={raw_col: "drift_raw"})
@@ -69,10 +91,31 @@ def _predict_fold(train: pd.DataFrame, test: pd.DataFrame,
     return out
 
 
+def _quarter_str(q) -> str:
+    """Canonical ``"YYYYQn"`` rendering, robust to Period vs plain-string input."""
+    return str(pd.Period(str(q), freq="Q"))
+
+
 def run_walk_forward(cfg: DriftMLConfig, *,
                      universe: str = "SP500",
-                     out_dir: str | Path) -> pd.DataFrame:
-    """Return the per-event backtest table and write ``backtest_results.csv``."""
+                     out_dir: str | Path,
+                     params: Optional[dict] = None,
+                     test_quarters: Optional[list[str]] = None) -> pd.DataFrame:
+    """Return the per-event backtest table and write ``backtest_results.csv``.
+
+    ``params``, when given, is the shared tuned LightGBM parameter set
+    threaded into every fold's :func:`_predict_fold` (early-stopping on each
+    fold's own most-recent training quarter, doc S3.2/S3.4); ``None`` keeps
+    the legacy hardcoded-params/fixed-round behaviour.
+
+    ``test_quarters``, when given, restricts the walk-forward to the folds
+    whose TEST quarter is in that set (e.g. ``["2022Q3", "2022Q4", ...]``,
+    the held-out test set from
+    :func:`~pead.sub_sampling_ml.serving.tune.split_tuning_test`) -- training
+    still uses every earlier quarter as usual; only which quarters get
+    SCORED is restricted (doc S3.4 Job 2). ``None`` scores every available
+    fold, same as before this option existed.
+    """
     df_all = _load_or_build(cfg)
     df = _restrict_universe(df_all, universe).reset_index(drop=True)
     _log(f"Backtest on {len(df):,} events (universe='{universe}').")
@@ -83,12 +126,20 @@ def run_walk_forward(cfg: DriftMLConfig, *,
         raise SystemExit(
             "No walk-forward splits available (not enough training quarters).")
 
+    if test_quarters is not None:
+        wanted = {_quarter_str(q) for q in test_quarters}
+        splits = [(tr, te) for tr, te in splits
+                 if _quarter_str(df[QUARTER_COL].iloc[te[0]]) in wanted]
+        if not splits:
+            raise SystemExit(
+                "No walk-forward folds fall within the requested test_quarters.")
+
     fold_results = []
     for i, (tr, te) in enumerate(splits, start=1):
         train, test = df.iloc[tr], df.iloc[te]
         _log(f"  fold {i}/{len(splits)}  train={len(train):,} test={len(test):,} "
              f"(test q={test[QUARTER_COL].iloc[0]})")
-        fold_results.append(_predict_fold(train, test, horizon, cfg))
+        fold_results.append(_predict_fold(train, test, horizon, cfg, params=params))
 
     results = pd.concat(fold_results, ignore_index=True)
     # Enforce quantile monotonicity per row.
